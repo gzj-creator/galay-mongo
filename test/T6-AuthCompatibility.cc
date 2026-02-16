@@ -6,8 +6,8 @@
 
 #include <galay-kernel/kernel/Runtime.h>
 
-#include "galay-mongo/async/MongoClient.h"
-#include "galay-mongo/sync/MongoSession.h"
+#include "galay-mongo/async/AsyncMongoClient.h"
+#include "galay-mongo/sync/MongoClient.h"
 #include "test/TestMongoConfig.h"
 
 using namespace galay::kernel;
@@ -35,7 +35,7 @@ Coroutine runAsyncAuth(IOScheduler* scheduler,
                        MongoConfig cfg,
                        AsyncMongoConfig async_cfg)
 {
-    MongoClient client(scheduler, async_cfg);
+    AsyncMongoClient client(scheduler, async_cfg);
 
     const std::expected<bool, MongoError> connected = co_await client.connect(cfg);
     if (!connected) {
@@ -79,7 +79,7 @@ int main()
 
     const auto cfg = mongo_test::toMongoConfig(test_cfg);
 
-    MongoSession session;
+    MongoClient session;
     auto sync_connected = session.connect(cfg);
     if (!sync_connected) {
         std::cerr << "FAIL: sync connect failed: " << sync_connected.error().message() << std::endl;

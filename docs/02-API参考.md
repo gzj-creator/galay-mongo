@@ -7,8 +7,8 @@
   - `galay-mongo/base/MongoConfig.h`
   - `galay-mongo/base/MongoError.h`
   - `galay-mongo/base/MongoValue.h`
-  - `galay-mongo/sync/MongoSession.h`
-  - `galay-mongo/async/MongoClient.h`
+  - `galay-mongo/sync/MongoClient.h`
+  - `galay-mongo/async/AsyncMongoClient.h`
 
 ## 2. 基础类型
 
@@ -67,9 +67,9 @@
 - `MongoArray`：数组值，支持 `append/at/values`。
 - `MongoReply`：命令响应包装，支持 `ok()/hasCommandError()/errorCode()/errorMessage()`。
 
-## 3. 同步 API（MongoSession）
+## 3. 同步 API（MongoClient）
 
-路径：`galay-mongo/sync/MongoSession.h`
+路径：`galay-mongo/sync/MongoClient.h`
 
 返回类型：
 
@@ -102,13 +102,13 @@
 - 二者仅填其一：返回 `MONGO_ERROR_INVALID_PARAM`。
 - 当前机制：`SCRAM-SHA-256`。
 
-## 4. 异步 API（MongoClient）
+## 4. 异步 API（AsyncMongoClient）
 
-路径：`galay-mongo/async/MongoClient.h`
+路径：`galay-mongo/async/AsyncMongoClient.h`
 
 ### 4.1 构造
 
-- `MongoClient(IOScheduler* scheduler, AsyncMongoConfig config = AsyncMongoConfig::noTimeout())`
+- `AsyncMongoClient(IOScheduler* scheduler, AsyncMongoConfig config = AsyncMongoConfig::noTimeout())`
 
 ### 4.2 连接
 
@@ -174,10 +174,10 @@
 ### 5.1 Sync
 
 ```cpp
-#include "galay-mongo/sync/MongoSession.h"
+#include "galay-mongo/sync/MongoClient.h"
 using namespace galay::mongo;
 
-MongoSession s;
+MongoClient s;
 MongoConfig cfg;
 cfg.host = "127.0.0.1";
 cfg.port = 27017;
@@ -195,10 +195,10 @@ auto rsp = s.command("admin", ping);
 ### 5.2 Async
 
 ```cpp
-#include "galay-mongo/async/MongoClient.h"
+#include "galay-mongo/async/AsyncMongoClient.h"
 
 Coroutine run(galay::kernel::IOScheduler* sched) {
-    galay::mongo::MongoClient client(sched);
+    galay::mongo::AsyncMongoClient client(sched);
     galay::mongo::MongoConfig cfg;
 
     std::expected<bool, galay::mongo::MongoError> conn = co_await client.connect(cfg);
@@ -218,10 +218,10 @@ Coroutine run(galay::kernel::IOScheduler* sched) {
 ### 5.3 Async Pipeline（单连接多 in-flight）
 
 ```cpp
-#include "galay-mongo/async/MongoClient.h"
+#include "galay-mongo/async/AsyncMongoClient.h"
 
 Coroutine run(galay::kernel::IOScheduler* sched) {
-    galay::mongo::MongoClient client(sched);
+    galay::mongo::AsyncMongoClient client(sched);
     galay::mongo::MongoConfig cfg;
 
     if (auto conn = co_await client.connect(cfg); !conn) co_return;

@@ -1,5 +1,5 @@
-#ifndef GALAY_MONGO_SESSION_H
-#define GALAY_MONGO_SESSION_H
+#ifndef GALAY_MONGO_SYNC_CLIENT_H
+#define GALAY_MONGO_SYNC_CLIENT_H
 
 #include "galay-mongo/base/MongoConfig.h"
 #include "galay-mongo/base/MongoError.h"
@@ -23,17 +23,17 @@ using MongoVoidResult = std::expected<void, MongoError>;
 /// 同步 MongoDB 客户端会话
 /// 提供阻塞式的连接、命令执行和 CRUD 操作
 /// 不可拷贝，支持移动语义
-class MongoSession
+class MongoClient
 {
 public:
-    MongoSession();
-    ~MongoSession();
+    MongoClient();
+    ~MongoClient();
 
-    MongoSession(const MongoSession&) = delete;
-    MongoSession& operator=(const MongoSession&) = delete;
+    MongoClient(const MongoClient&) = delete;
+    MongoClient& operator=(const MongoClient&) = delete;
 
-    MongoSession(MongoSession&& other) noexcept;
-    MongoSession& operator=(MongoSession&& other) noexcept;
+    MongoClient(MongoClient&& other) noexcept;
+    MongoClient& operator=(MongoClient&& other) noexcept;
 
     /// 使用完整配置连接到 MongoDB（含认证）
     MongoVoidResult connect(const MongoConfig& config);
@@ -134,4 +134,4 @@ private:
 
 } // namespace galay::mongo
 
-#endif // GALAY_MONGO_SESSION_H
+#endif // GALAY_MONGO_SYNC_CLIENT_H

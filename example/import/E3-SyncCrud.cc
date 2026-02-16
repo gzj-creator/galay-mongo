@@ -23,7 +23,7 @@ int main()
 {
     const auto cfg = mongo_example::loadMongoConfigFromEnv();
 
-    MongoSession session;
+    MongoClient session;
     auto connected = session.connect(cfg);
     if (!connected) {
         std::cerr << "Connect failed: " << connected.error().message() << std::endl;

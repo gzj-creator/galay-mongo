@@ -6,7 +6,7 @@ function(add_mongo_test target_name source_file)
 endfunction()
 
 add_mongo_test(T1-BsonProtocol T1-BsonProtocol.cc)
-add_mongo_test(T2-SyncMongoSession T2-SyncMongoSession.cc)
+add_mongo_test(T2-SyncMongoClient T2-SyncMongoClient.cc)
 add_mongo_test(T3-AsyncMongoPipeline T3-AsyncMongoPipeline.cc)
 add_mongo_test(T4-SyncMongoFunctional T4-SyncMongoFunctional.cc)
 add_mongo_test(T5-AsyncMongoFunctional T5-AsyncMongoFunctional.cc)

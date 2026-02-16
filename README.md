@@ -49,11 +49,11 @@ cmake --build build -j
 ## 快速示例（同步）
 
 ```cpp
-#include "galay-mongo/sync/MongoSession.h"
+#include "galay-mongo/sync/MongoClient.h"
 using namespace galay::mongo;
 
 int main() {
-    MongoSession session;
+    MongoClient session;
 
     MongoConfig cfg;
     cfg.host = "127.0.0.1";
@@ -73,8 +73,8 @@ int main() {
 
 ## 认证说明
 
-- 同步 `MongoSession` 支持 `SCRAM-SHA-256`。
-- 异步 `MongoClient` 支持 `SCRAM-SHA-256`（`connect(config)` 时配置 `username/password/auth_database`）。
+- 同步 `MongoClient` 支持 `SCRAM-SHA-256`。
+- 异步 `AsyncMongoClient` 支持 `SCRAM-SHA-256`（`connect(config)` 时配置 `username/password/auth_database`）。
 
 ## 测试
 
@@ -86,7 +86,7 @@ cmake --build build -j
 ./build/test/T1-BsonProtocol
 
 # 需要本地可访问 MongoDB
-./build/test/T2-SyncMongoSession
+./build/test/T2-SyncMongoClient
 ./build/test/T3-AsyncMongoPipeline
 ./build/test/T4-SyncMongoFunctional
 ./build/test/T5-AsyncMongoFunctional

@@ -1,4 +1,4 @@
-#include "MongoClient.h"
+#include "AsyncMongoClient.h"
 #include "galay-mongo/base/SocketOptions.h"
 
 #include <openssl/evp.h>
@@ -625,7 +625,7 @@ bool MongoConnectAwaitable::ProtocolFlowAwaitable::handleComplete(GHandle handle
 }
 #endif
 
-MongoConnectAwaitable::MongoConnectAwaitable(MongoClient& client, MongoConfig config)
+MongoConnectAwaitable::MongoConnectAwaitable(AsyncMongoClient& client, MongoConfig config)
     : CustomAwaitable(client.m_socket.controller())
     , m_client(client)
     , m_config(std::move(config))
@@ -1148,7 +1148,7 @@ bool MongoCommandAwaitable::ProtocolFlowAwaitable::handleComplete(GHandle handle
 }
 #endif
 
-MongoCommandAwaitable::MongoCommandAwaitable(MongoClient& client,
+MongoCommandAwaitable::MongoCommandAwaitable(AsyncMongoClient& client,
                                              std::string database,
                                              MongoDocument command)
     : MongoCommandAwaitable(client)
@@ -1156,7 +1156,7 @@ MongoCommandAwaitable::MongoCommandAwaitable(MongoClient& client,
     arm(std::move(database), std::move(command));
 }
 
-MongoCommandAwaitable::MongoCommandAwaitable(MongoClient& client)
+MongoCommandAwaitable::MongoCommandAwaitable(AsyncMongoClient& client)
     : CustomAwaitable(client.m_socket.controller())
     , m_client(client)
     , m_flow_awaitable(this)
@@ -1468,7 +1468,7 @@ bool MongoPipelineAwaitable::ProtocolFlowAwaitable::handleComplete(GHandle handl
 }
 #endif
 
-MongoPipelineAwaitable::MongoPipelineAwaitable(MongoClient& client,
+MongoPipelineAwaitable::MongoPipelineAwaitable(AsyncMongoClient& client,
                                                std::string database,
                                                std::vector<MongoDocument> commands)
     : CustomAwaitable(client.m_socket.controller())
@@ -1639,7 +1639,7 @@ std::expected<std::vector<MongoPipelineResponse>, MongoError> MongoPipelineAwait
     return responses;
 }
 
-int32_t MongoClient::reserveRequestIdBlock(size_t count)
+int32_t AsyncMongoClient::reserveRequestIdBlock(size_t count)
 {
     if (count == 0) {
         count = 1;
@@ -1666,12 +1666,12 @@ int32_t MongoClient::reserveRequestIdBlock(size_t count)
     return first;
 }
 
-int32_t MongoClient::nextRequestId()
+int32_t AsyncMongoClient::nextRequestId()
 {
     return reserveRequestIdBlock(1);
 }
 
-MongoClient::MongoClient(IOScheduler* scheduler, AsyncMongoConfig config)
+AsyncMongoClient::AsyncMongoClient(IOScheduler* scheduler, AsyncMongoConfig config)
     : m_ring_buffer(config.buffer_size > 0 ? config.buffer_size : RingBuffer::kDefaultCapacity)
     , m_pipeline_reserve_per_command(std::max<size_t>(32, config.pipeline_reserve_per_command))
 {
@@ -1683,7 +1683,7 @@ MongoClient::MongoClient(IOScheduler* scheduler, AsyncMongoConfig config)
     }
 }
 
-MongoClient::MongoClient(MongoClient&& other) noexcept
+AsyncMongoClient::AsyncMongoClient(AsyncMongoClient&& other) noexcept
     : m_is_closed(other.m_is_closed)
     , m_socket(std::move(other.m_socket))
     , m_ring_buffer(std::move(other.m_ring_buffer))
@@ -1695,7 +1695,7 @@ MongoClient::MongoClient(MongoClient&& other) noexcept
     other.m_is_closed = true;
 }
 
-MongoClient& MongoClient::operator=(MongoClient&& other) noexcept
+AsyncMongoClient& AsyncMongoClient::operator=(AsyncMongoClient&& other) noexcept
 {
     if (this != &other) {
         m_is_closed = other.m_is_closed;
@@ -1713,7 +1713,7 @@ MongoClient& MongoClient::operator=(MongoClient&& other) noexcept
     return *this;
 }
 
-MongoConnectAwaitable& MongoClient::connect(MongoConfig config)
+MongoConnectAwaitable& AsyncMongoClient::connect(MongoConfig config)
 {
     if (!m_connect_awaitable.has_value() || m_connect_awaitable->isInvalid()) {
         m_connect_awaitable.emplace(*this, std::move(config));
@@ -1721,7 +1721,7 @@ MongoConnectAwaitable& MongoClient::connect(MongoConfig config)
     return *m_connect_awaitable;
 }
 
-MongoConnectAwaitable& MongoClient::connect(std::string_view host,
+MongoConnectAwaitable& AsyncMongoClient::connect(std::string_view host,
                                             uint16_t port,
                                             std::string_view database)
 {
@@ -1732,7 +1732,7 @@ MongoConnectAwaitable& MongoClient::connect(std::string_view host,
     return connect(std::move(config));
 }
 
-MongoCommandAwaitable& MongoClient::command(std::string database, MongoDocument command)
+MongoCommandAwaitable& AsyncMongoClient::command(std::string database, MongoDocument command)
 {
     if (!m_command_awaitable.has_value()) {
         m_command_awaitable.emplace(*this);
@@ -1743,7 +1743,7 @@ MongoCommandAwaitable& MongoClient::command(std::string database, MongoDocument 
     return *m_command_awaitable;
 }
 
-MongoCommandAwaitable& MongoClient::ping(std::string database)
+MongoCommandAwaitable& AsyncMongoClient::ping(std::string database)
 {
     if (!m_command_awaitable.has_value()) {
         m_command_awaitable.emplace(*this);
@@ -1754,7 +1754,7 @@ MongoCommandAwaitable& MongoClient::ping(std::string database)
     return *m_command_awaitable;
 }
 
-MongoPipelineAwaitable& MongoClient::pipeline(std::string database,
+MongoPipelineAwaitable& AsyncMongoClient::pipeline(std::string database,
                                               std::vector<MongoDocument> commands)
 {
     if (!m_pipeline_awaitable.has_value()) {

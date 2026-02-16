@@ -1,5 +1,5 @@
 #include "benchmark/common/BenchCommon.h"
-#include "galay-mongo/async/MongoClient.h"
+#include "galay-mongo/async/AsyncMongoClient.h"
 
 #include <galay-kernel/kernel/Runtime.h>
 
@@ -88,7 +88,7 @@ Coroutine runWorker(IOScheduler* scheduler,
                     mongo_bench::BenchConfig cfg,
                     size_t worker_count)
 {
-    MongoClient client(scheduler);
+    AsyncMongoClient client(scheduler);
     if (auto logger = client.logger().get()) {
         logger->set_level(spdlog::level::err);
     }

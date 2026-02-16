@@ -1,7 +1,7 @@
 #include <chrono>
 #include <iostream>
 
-#include "galay-mongo/sync/MongoSession.h"
+#include "galay-mongo/sync/MongoClient.h"
 #include "test/TestMongoConfig.h"
 
 using namespace galay::mongo;
@@ -13,7 +13,7 @@ int main()
     const auto test_cfg = mongo_test::loadMongoTestConfig();
     mongo_test::printMongoTestConfig(test_cfg);
 
-    MongoSession session;
+    MongoClient session;
     const auto cfg = mongo_test::toMongoConfig(test_cfg);
 
     std::cout << "Connecting to MongoDB..." << std::endl;

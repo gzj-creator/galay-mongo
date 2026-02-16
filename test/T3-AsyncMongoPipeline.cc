@@ -6,7 +6,7 @@
 
 #include <galay-kernel/kernel/Runtime.h>
 
-#include "galay-mongo/async/MongoClient.h"
+#include "galay-mongo/async/AsyncMongoClient.h"
 #include "test/TestMongoConfig.h"
 
 using namespace galay::kernel;
@@ -24,7 +24,7 @@ Coroutine runPipelineTest(IOScheduler* scheduler,
                           MongoConfig cfg,
                           AsyncMongoConfig async_cfg)
 {
-    MongoClient client(scheduler, async_cfg);
+    AsyncMongoClient client(scheduler, async_cfg);
 
     const std::expected<bool, MongoError> conn_result =
         co_await client.connect(std::move(cfg));

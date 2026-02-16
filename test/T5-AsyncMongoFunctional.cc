@@ -6,7 +6,7 @@
 
 #include <galay-kernel/kernel/Runtime.h>
 
-#include "galay-mongo/async/MongoClient.h"
+#include "galay-mongo/async/AsyncMongoClient.h"
 #include "test/TestMongoConfig.h"
 #include "test/TestMongoReplyHelper.h"
 
@@ -125,7 +125,7 @@ Coroutine runAsyncFunctional(IOScheduler* scheduler,
                              MongoConfig cfg,
                              AsyncMongoConfig async_cfg)
 {
-    MongoClient client(scheduler, async_cfg);
+    AsyncMongoClient client(scheduler, async_cfg);
 
     const std::string database = cfg.database;
     const std::string collection = "galay_mongo_async_functional";

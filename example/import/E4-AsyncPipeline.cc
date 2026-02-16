@@ -25,7 +25,7 @@ Coroutine run(IOScheduler* scheduler,
               MongoConfig cfg,
               AsyncMongoConfig async_cfg)
 {
-    MongoClient client(scheduler, async_cfg);
+    AsyncMongoClient client(scheduler, async_cfg);
 
     const std::expected<bool, MongoError> conn_result = co_await client.connect(cfg);
     if (!conn_result) {

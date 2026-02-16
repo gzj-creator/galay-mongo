@@ -2,7 +2,7 @@
 #include <iostream>
 
 #include "example/common/ExampleConfig.h"
-#include "galay-mongo/sync/MongoSession.h"
+#include "galay-mongo/sync/MongoClient.h"
 
 using namespace galay::mongo;
 
@@ -22,7 +22,7 @@ int main()
 {
     const auto cfg = mongo_example::loadMongoConfigFromEnv();
 
-    MongoSession session;
+    MongoClient session;
     auto connected = session.connect(cfg);
     if (!connected) {
         std::cerr << "Connect failed: " << connected.error().message() << std::endl;

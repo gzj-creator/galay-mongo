@@ -2,7 +2,7 @@
 #include <iostream>
 #include <string>
 
-#include "galay-mongo/sync/MongoSession.h"
+#include "galay-mongo/sync/MongoClient.h"
 #include "test/TestMongoConfig.h"
 #include "test/TestMongoReplyHelper.h"
 
@@ -30,7 +30,7 @@ int main()
     const std::string collection = "galay_mongo_sync_functional";
     const int64_t doc_id = makeUniqueId();
 
-    MongoSession session;
+    MongoClient session;
     const auto cfg = mongo_test::toMongoConfig(test_cfg);
 
     auto fail = [&](const std::string& message) -> int {

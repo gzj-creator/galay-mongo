@@ -7,7 +7,7 @@
 #include <galay-kernel/kernel/Runtime.h>
 
 #include "example/common/ExampleConfig.h"
-#include "galay-mongo/async/MongoClient.h"
+#include "galay-mongo/async/AsyncMongoClient.h"
 
 using namespace galay::kernel;
 using namespace galay::mongo;
@@ -120,7 +120,7 @@ Coroutine run(IOScheduler* scheduler,
               MongoConfig cfg,
               AsyncMongoConfig async_cfg)
 {
-    MongoClient client(scheduler, async_cfg);
+    AsyncMongoClient client(scheduler, async_cfg);
 
     const std::string collection = "galay_mongo_example_async_command_crud";
     const int64_t doc_id = makeUniqueId();

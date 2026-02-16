@@ -1,4 +1,4 @@
-#include "MongoSession.h"
+#include "MongoClient.h"
 
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -57,14 +57,14 @@ MongoDocument buildClientMetadata(const std::string& app_name)
 
 } // namespace
 
-MongoSession::MongoSession() = default;
+MongoClient::MongoClient() = default;
 
-MongoSession::~MongoSession()
+MongoClient::~MongoClient()
 {
     close();
 }
 
-MongoSession::MongoSession(MongoSession&& other) noexcept
+MongoClient::MongoClient(MongoClient&& other) noexcept
     : m_connection(std::move(other.m_connection))
     , m_config(std::move(other.m_config))
     , m_next_request_id(other.m_next_request_id)
@@ -72,7 +72,7 @@ MongoSession::MongoSession(MongoSession&& other) noexcept
     other.m_next_request_id = 1;
 }
 
-MongoSession& MongoSession::operator=(MongoSession&& other) noexcept
+MongoClient& MongoClient::operator=(MongoClient&& other) noexcept
 {
     if (this != &other) {
         close();
@@ -84,7 +84,7 @@ MongoSession& MongoSession::operator=(MongoSession&& other) noexcept
     return *this;
 }
 
-MongoVoidResult MongoSession::connect(const MongoConfig& config)
+MongoVoidResult MongoClient::connect(const MongoConfig& config)
 {
     m_config = config;
 
@@ -116,7 +116,7 @@ MongoVoidResult MongoSession::connect(const MongoConfig& config)
     return {};
 }
 
-MongoVoidResult MongoSession::connect(const std::string& host,
+MongoVoidResult MongoClient::connect(const std::string& host,
                                       uint16_t port,
                                       const std::string& database)
 {
@@ -124,19 +124,19 @@ MongoVoidResult MongoSession::connect(const std::string& host,
     return connect(config);
 }
 
-MongoResult MongoSession::command(const std::string& database, const MongoDocument& command)
+MongoResult MongoClient::command(const std::string& database, const MongoDocument& command)
 {
     return executeCommand(database, command, true);
 }
 
-MongoResult MongoSession::ping(const std::string& database)
+MongoResult MongoClient::ping(const std::string& database)
 {
     MongoDocument command;
     command.append("ping", int32_t(1));
     return executeCommand(database, command, true);
 }
 
-MongoResult MongoSession::findOne(const std::string& database,
+MongoResult MongoClient::findOne(const std::string& database,
                                   const std::string& collection,
                                   const MongoDocument& filter,
                                   const MongoDocument& projection)
@@ -151,7 +151,7 @@ MongoResult MongoSession::findOne(const std::string& database,
     return executeCommand(database, command, true);
 }
 
-MongoResult MongoSession::insertOne(const std::string& database,
+MongoResult MongoClient::insertOne(const std::string& database,
                                     const std::string& collection,
                                     const MongoDocument& document)
 {
@@ -165,7 +165,7 @@ MongoResult MongoSession::insertOne(const std::string& database,
     return executeCommand(database, command, true);
 }
 
-MongoResult MongoSession::updateOne(const std::string& database,
+MongoResult MongoClient::updateOne(const std::string& database,
                                     const std::string& collection,
                                     const MongoDocument& filter,
                                     const MongoDocument& update,
@@ -187,7 +187,7 @@ MongoResult MongoSession::updateOne(const std::string& database,
     return executeCommand(database, command, true);
 }
 
-MongoResult MongoSession::deleteOne(const std::string& database,
+MongoResult MongoClient::deleteOne(const std::string& database,
                                     const std::string& collection,
                                     const MongoDocument& filter)
 {
@@ -205,12 +205,12 @@ MongoResult MongoSession::deleteOne(const std::string& database,
     return executeCommand(database, command, true);
 }
 
-void MongoSession::close()
+void MongoClient::close()
 {
     m_connection.disconnect();
 }
 
-MongoResult MongoSession::executeCommand(const std::string& database,
+MongoResult MongoClient::executeCommand(const std::string& database,
                                          const MongoDocument& command,
                                          bool check_ok)
 {
@@ -264,7 +264,7 @@ MongoResult MongoSession::executeCommand(const std::string& database,
     return reply;
 }
 
-MongoVoidResult MongoSession::authenticateIfNeeded(const MongoConfig& config)
+MongoVoidResult MongoClient::authenticateIfNeeded(const MongoConfig& config)
 {
     if (config.username.empty() && config.password.empty()) {
         return {};
@@ -278,7 +278,7 @@ MongoVoidResult MongoSession::authenticateIfNeeded(const MongoConfig& config)
     return authenticateScramSha256(config);
 }
 
-MongoVoidResult MongoSession::authenticateScramSha256(const MongoConfig& config)
+MongoVoidResult MongoClient::authenticateScramSha256(const MongoConfig& config)
 {
     const std::string auth_db =
         !config.auth_database.empty() ? config.auth_database :
@@ -469,7 +469,7 @@ MongoVoidResult MongoSession::authenticateScramSha256(const MongoConfig& config)
     return {};
 }
 
-std::string MongoSession::escapeScramUsername(const std::string& username)
+std::string MongoClient::escapeScramUsername(const std::string& username)
 {
     std::string escaped;
     escaped.reserve(username.size());
@@ -488,7 +488,7 @@ std::string MongoSession::escapeScramUsername(const std::string& username)
 }
 
 std::unordered_map<std::string, std::string>
-MongoSession::parseScramPayload(const std::string& payload)
+MongoClient::parseScramPayload(const std::string& payload)
 {
     std::unordered_map<std::string, std::string> kv;
 
@@ -511,7 +511,7 @@ MongoSession::parseScramPayload(const std::string& payload)
     return kv;
 }
 
-std::string MongoSession::base64Encode(const std::vector<uint8_t>& bytes)
+std::string MongoClient::base64Encode(const std::vector<uint8_t>& bytes)
 {
     if (bytes.empty()) {
         return "";
@@ -534,7 +534,7 @@ std::string MongoSession::base64Encode(const std::vector<uint8_t>& bytes)
 }
 
 std::expected<std::vector<uint8_t>, MongoError>
-MongoSession::base64Decode(const std::string& text)
+MongoClient::base64Decode(const std::string& text)
 {
     if (text.empty()) {
         return std::vector<uint8_t>{};
@@ -567,7 +567,7 @@ MongoSession::base64Decode(const std::string& text)
 }
 
 std::expected<std::vector<uint8_t>, MongoError>
-MongoSession::pbkdf2HmacSha256(const std::string& password,
+MongoClient::pbkdf2HmacSha256(const std::string& password,
                                const std::vector<uint8_t>& salt,
                                int iterations)
 {
@@ -591,7 +591,7 @@ MongoSession::pbkdf2HmacSha256(const std::string& password,
 }
 
 std::expected<std::vector<uint8_t>, MongoError>
-MongoSession::hmacSha256(const std::vector<uint8_t>& key, const std::string& data)
+MongoClient::hmacSha256(const std::vector<uint8_t>& key, const std::string& data)
 {
     std::vector<uint8_t> output(EVP_MAX_MD_SIZE, 0);
     unsigned int out_len = 0;
@@ -613,7 +613,7 @@ MongoSession::hmacSha256(const std::vector<uint8_t>& key, const std::string& dat
 }
 
 std::expected<std::vector<uint8_t>, MongoError>
-MongoSession::sha256(const std::vector<uint8_t>& data)
+MongoClient::sha256(const std::vector<uint8_t>& data)
 {
     std::vector<uint8_t> output(SHA256_DIGEST_LENGTH, 0);
     if (::SHA256(data.data(), data.size(), output.data()) == nullptr) {
@@ -623,7 +623,7 @@ MongoSession::sha256(const std::vector<uint8_t>& data)
 }
 
 std::vector<uint8_t>
-MongoSession::xorBytes(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b)
+MongoClient::xorBytes(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b)
 {
     const size_t size = std::min(a.size(), b.size());
     std::vector<uint8_t> out(size, 0);
@@ -633,7 +633,7 @@ MongoSession::xorBytes(const std::vector<uint8_t>& a, const std::vector<uint8_t>
     return out;
 }
 
-std::expected<std::string, MongoError> MongoSession::generateClientNonce()
+std::expected<std::string, MongoError> MongoClient::generateClientNonce()
 {
     std::vector<uint8_t> random_bytes(18, 0);
     if (::RAND_bytes(random_bytes.data(), static_cast<int>(random_bytes.size())) != 1) {

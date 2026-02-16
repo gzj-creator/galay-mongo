@@ -2,7 +2,7 @@
 #include <iostream>
 #include <string>
 
-#include "galay-mongo/sync/MongoSession.h"
+#include "galay-mongo/sync/MongoClient.h"
 #include "test/TestMongoConfig.h"
 #include "test/TestMongoReplyHelper.h"
 
@@ -45,7 +45,7 @@ int main()
     const size_t payload_size = 96 * 1024;
     const std::string payload = makePayload(payload_size);
 
-    MongoSession session;
+    MongoClient session;
 
     auto fail = [&](const std::string& message) -> int {
         std::cerr << "FAIL: " << message << std::endl;

@@ -6,8 +6,8 @@ module;
 #include "galay-mongo/base/MongoLog.h"
 #include "galay-mongo/base/MongoValue.h"
 #include "galay-mongo/async/AsyncMongoConfig.h"
-#include "galay-mongo/async/MongoClient.h"
-#include "galay-mongo/sync/MongoSession.h"
+#include "galay-mongo/async/AsyncMongoClient.h"
+#include "galay-mongo/sync/MongoClient.h"
 
 export module galay.mongo;
 
@@ -25,7 +25,7 @@ export using ::galay::mongo::MongoConnectAwaitable;
 export using ::galay::mongo::MongoCommandAwaitable;
 export using ::galay::mongo::MongoPipelineResponse;
 export using ::galay::mongo::MongoPipelineAwaitable;
+export using ::galay::mongo::AsyncMongoClient;
 export using ::galay::mongo::MongoClient;
 export using ::galay::mongo::MongoResult;
 export using ::galay::mongo::MongoVoidResult;
-export using ::galay::mongo::MongoSession;

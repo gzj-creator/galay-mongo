@@ -1,5 +1,5 @@
-#ifndef GALAY_MONGO_CLIENT_H
-#define GALAY_MONGO_CLIENT_H
+#ifndef GALAY_MONGO_ASYNC_CLIENT_H
+#define GALAY_MONGO_ASYNC_CLIENT_H
 
 #include <galay-kernel/async/TcpSocket.h>
 #include <galay-kernel/common/Buffer.h>
@@ -37,7 +37,7 @@ using galay::kernel::ReadvIOContext;
 using galay::kernel::RingBuffer;
 using galay::kernel::SendIOContext;
 
-class MongoClient;
+class AsyncMongoClient;
 
 /// 异步连接 awaitable，处理 TCP 连接 + hello 握手 + SCRAM-SHA-256 认证的完整流程
 /// co_await 后返回 std::expected<bool, MongoError>，true 表示连接成功
@@ -70,7 +70,7 @@ public:
         ReadvIOContext m_recv_ctx;
     };
 
-    MongoConnectAwaitable(MongoClient& client, MongoConfig config);
+    MongoConnectAwaitable(AsyncMongoClient& client, MongoConfig config);
 
     bool await_ready() const noexcept { return false; }
     using CustomAwaitable::await_suspend;
@@ -108,7 +108,7 @@ private:
     std::expected<bool, MongoError> handleSaslContinueReply(MongoReply&& reply);
     std::expected<bool, MongoError> handleSaslFinalReply(MongoReply&& reply);
 
-    MongoClient& m_client;
+    AsyncMongoClient& m_client;
     MongoConfig m_config;
     std::string m_encoded_request;
     size_t m_sent = 0;
@@ -155,10 +155,10 @@ public:
         ReadvIOContext m_recv_ctx;
     };
 
-    MongoCommandAwaitable(MongoClient& client,
+    MongoCommandAwaitable(AsyncMongoClient& client,
                           std::string database,
                           MongoDocument command);
-    explicit MongoCommandAwaitable(MongoClient& client);
+    explicit MongoCommandAwaitable(AsyncMongoClient& client);
 
     bool await_ready() const noexcept { return false; }
     using CustomAwaitable::await_suspend;
@@ -167,7 +167,7 @@ public:
     bool isInvalid() const { return m_lifecycle == Lifecycle::Invalid; }
 
 private:
-    friend class MongoClient;
+    friend class AsyncMongoClient;
 
     enum class Lifecycle {
         Invalid,
@@ -187,7 +187,7 @@ private:
     void setRecvError(const IOError& io_error) noexcept;
     std::expected<bool, MongoError> tryParseFromRingBuffer();
 
-    MongoClient& m_client;
+    AsyncMongoClient& m_client;
     std::string m_encoded_request;
     size_t m_sent = 0;
     Lifecycle m_lifecycle = Lifecycle::Invalid;
@@ -240,7 +240,7 @@ public:
         ReadvIOContext m_recv_ctx;
     };
 
-    MongoPipelineAwaitable(MongoClient& client,
+    MongoPipelineAwaitable(AsyncMongoClient& client,
                            std::string database,
                            std::vector<MongoDocument> commands);
 
@@ -251,7 +251,7 @@ public:
     bool isInvalid() const { return m_lifecycle == Lifecycle::Invalid; }
 
 private:
-    friend class MongoClient;
+    friend class AsyncMongoClient;
 
     enum class Lifecycle {
         Invalid,
@@ -270,7 +270,7 @@ private:
     void setRecvError(const IOError& io_error) noexcept;
     std::expected<bool, MongoError> tryParseFromRingBuffer();
 
-    MongoClient& m_client;
+    AsyncMongoClient& m_client;
     std::string m_encoded_batch;
     size_t m_sent = 0;
     size_t m_received = 0;
@@ -283,19 +283,19 @@ private:
     std::optional<MongoError> m_chain_error;
 };
 
-class MongoClient
+class AsyncMongoClient
 {
 public:
-    MongoClient(IOScheduler* scheduler,
+    AsyncMongoClient(IOScheduler* scheduler,
                 AsyncMongoConfig config = AsyncMongoConfig::noTimeout());
 
-    MongoClient(MongoClient&& other) noexcept;
-    MongoClient& operator=(MongoClient&& other) noexcept;
+    AsyncMongoClient(AsyncMongoClient&& other) noexcept;
+    AsyncMongoClient& operator=(AsyncMongoClient&& other) noexcept;
 
-    MongoClient(const MongoClient&) = delete;
-    MongoClient& operator=(const MongoClient&) = delete;
+    AsyncMongoClient(const AsyncMongoClient&) = delete;
+    AsyncMongoClient& operator=(const AsyncMongoClient&) = delete;
 
-    ~MongoClient() = default;
+    ~AsyncMongoClient() = default;
 
     MongoConnectAwaitable& connect(MongoConfig config);
     MongoConnectAwaitable& connect(std::string_view host,
@@ -347,4 +347,4 @@ private:
 
 } // namespace galay::mongo
 
-#endif // GALAY_MONGO_CLIENT_H
+#endif // GALAY_MONGO_ASYNC_CLIENT_H

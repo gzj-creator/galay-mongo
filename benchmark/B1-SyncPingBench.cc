@@ -1,5 +1,5 @@
 #include "benchmark/common/BenchCommon.h"
-#include "galay-mongo/sync/MongoSession.h"
+#include "galay-mongo/sync/MongoClient.h"
 
 #include <atomic>
 #include <chrono>
@@ -21,12 +21,12 @@ int main(int argc, char** argv)
     const auto cfg = mongo_bench::loadBenchConfig(argc, argv);
     mongo_bench::printBenchConfig("B1-SyncPingBench", cfg);
 
-    std::vector<std::unique_ptr<MongoSession>> sessions;
+    std::vector<std::unique_ptr<MongoClient>> sessions;
     sessions.reserve(cfg.concurrency);
 
     const auto mongo_cfg = mongo_bench::toMongoConfig(cfg);
     for (size_t i = 0; i < cfg.concurrency; ++i) {
-        auto session = std::make_unique<MongoSession>();
+        auto session = std::make_unique<MongoClient>();
         auto conn = session->connect(mongo_cfg);
         if (!conn) {
             std::cerr << "connect failed (worker " << i << "): "
@@ -55,7 +55,7 @@ int main(int argc, char** argv)
             size_t local_ok = 0;
             size_t local_error = 0;
 
-            MongoSession& session = *sessions[i];
+            MongoClient& session = *sessions[i];
             while (true) {
                 const size_t index = next.fetch_add(1, std::memory_order_relaxed);
                 if (index >= cfg.total_requests) {
