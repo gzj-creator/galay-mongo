@@ -28,13 +28,40 @@
 - CMake 3.20+
 - OpenSSL
 - spdlog
-- galay-kernel
+- Galay 内部依赖（统一联调推荐）：
+  - `galay-kernel`（构建必需）
+  - `galay-utils`（推荐）
+  - `galay-http`（推荐）
+
+## 依赖安装（macOS / Homebrew）
+
+```bash
+brew install cmake spdlog openssl
+```
+
+## 依赖安装（Ubuntu / Debian）
+
+```bash
+sudo apt-get update
+sudo apt-get install -y cmake g++ libspdlog-dev libssl-dev
+```
+
+## 拉取源码（统一联调推荐）
+
+```bash
+git clone https://github.com/gzj-creator/galay-kernel.git
+git clone https://github.com/gzj-creator/galay-utils.git
+git clone https://github.com/gzj-creator/galay-http.git
+git clone https://github.com/gzj-creator/galay-mongo.git
+```
+
+仅单独构建 `galay-mongo` 时，最小内部依赖为 `galay-kernel`。
 
 ## 构建
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
+cmake --build build --parallel
 ```
 
 常用开关：
@@ -80,7 +107,7 @@ int main() {
 
 ```bash
 cmake -S . -B build -DGALAY_MONGO_BUILD_TESTS=ON
-cmake --build build -j
+cmake --build build --parallel
 
 # 协议单测
 ./build/test/T1-BsonProtocol
@@ -119,7 +146,7 @@ cmake --build build -j
 
 ```bash
 cmake -S . -B build -DGALAY_MONGO_BUILD_EXAMPLES=ON
-cmake --build build -j
+cmake --build build --parallel
 ```
 
 常用 include 示例：
@@ -153,7 +180,7 @@ cmake --build build -j
 
 ```bash
 cmake -S . -B build -DGALAY_MONGO_BUILD_BENCHMARKS=ON
-cmake --build build -j
+cmake --build build --parallel
 ```
 
 运行（参数顺序）：
