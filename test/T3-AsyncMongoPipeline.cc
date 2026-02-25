@@ -19,15 +19,20 @@ struct PipelineTestState
     std::string error;
 };
 
+struct AsyncClientConfig
+{
+    MongoConfig mongo;
+    AsyncMongoConfig async;
+};
+
 Coroutine runPipelineTest(IOScheduler* scheduler,
                           PipelineTestState* state,
-                          MongoConfig cfg,
-                          AsyncMongoConfig async_cfg)
+                          AsyncClientConfig cfg)
 {
-    AsyncMongoClient client(scheduler, async_cfg);
+    AsyncMongoClient client(scheduler, cfg.async);
 
     const std::expected<bool, MongoError> conn_result =
-        co_await client.connect(std::move(cfg));
+        co_await client.connect(std::move(cfg.mongo));
     if (!conn_result) {
         state->ok.store(false, std::memory_order_relaxed);
         state->error = "connect failed: " + conn_result.error().message();
@@ -115,8 +120,9 @@ int main()
     PipelineTestState state;
     scheduler->spawn(runPipelineTest(scheduler,
                                      &state,
-                                     mongo_test::toMongoConfig(test_cfg),
-                                     mongo_test::loadAsyncMongoTestConfig()));
+                                     AsyncClientConfig{
+                                         mongo_test::toMongoConfig(test_cfg),
+                                         mongo_test::loadAsyncMongoTestConfig()}));
 
     using namespace std::chrono_literals;
     const auto deadline = std::chrono::steady_clock::now() + 15s;

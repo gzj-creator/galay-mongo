@@ -113,6 +113,12 @@ struct AsyncFunctionalState
     std::string error;
 };
 
+struct AsyncClientConfig
+{
+    MongoConfig mongo;
+    AsyncMongoConfig async;
+};
+
 void setFailure(AsyncFunctionalState* state, std::string message)
 {
     state->ok.store(false, std::memory_order_relaxed);
@@ -122,16 +128,15 @@ void setFailure(AsyncFunctionalState* state, std::string message)
 
 Coroutine runAsyncFunctional(IOScheduler* scheduler,
                              AsyncFunctionalState* state,
-                             MongoConfig cfg,
-                             AsyncMongoConfig async_cfg)
+                             AsyncClientConfig cfg)
 {
-    AsyncMongoClient client(scheduler, async_cfg);
+    AsyncMongoClient client(scheduler, cfg.async);
 
-    const std::string database = cfg.database;
+    const std::string database = cfg.mongo.database;
     const std::string collection = "galay_mongo_async_functional";
     const int64_t doc_id = makeUniqueId();
 
-    const std::expected<bool, MongoError> connected = co_await client.connect(cfg);
+    const std::expected<bool, MongoError> connected = co_await client.connect(cfg.mongo);
     if (!connected) {
         setFailure(state, "connect failed: " + connected.error().message());
         co_return;
@@ -336,8 +341,9 @@ int main()
     AsyncFunctionalState state;
     scheduler->spawn(runAsyncFunctional(scheduler,
                                         &state,
-                                        mongo_test::toMongoConfig(test_cfg),
-                                        mongo_test::loadAsyncMongoTestConfig()));
+                                        AsyncClientConfig{
+                                            mongo_test::toMongoConfig(test_cfg),
+                                            mongo_test::loadAsyncMongoTestConfig()}));
 
     using namespace std::chrono_literals;
     const auto deadline = std::chrono::steady_clock::now() + 20s;

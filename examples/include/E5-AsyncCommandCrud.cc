@@ -108,6 +108,12 @@ struct RunState
     std::string error;
 };
 
+struct AsyncClientConfig
+{
+    MongoConfig mongo;
+    AsyncMongoConfig async;
+};
+
 void setFailure(RunState* state, std::string message)
 {
     state->ok.store(false, std::memory_order_relaxed);
@@ -117,43 +123,42 @@ void setFailure(RunState* state, std::string message)
 
 Coroutine run(IOScheduler* scheduler,
               RunState* state,
-              MongoConfig cfg,
-              AsyncMongoConfig async_cfg)
+              AsyncClientConfig cfg)
 {
-    AsyncMongoClient client(scheduler, async_cfg);
+    AsyncMongoClient client(scheduler, cfg.async);
 
     const std::string collection = "galay_mongo_example_async_command_crud";
     const int64_t doc_id = makeUniqueId();
 
-    const std::expected<bool, MongoError> conn_result = co_await client.connect(cfg);
+    const std::expected<bool, MongoError> conn_result = co_await client.connect(cfg.mongo);
     if (!conn_result) {
         setFailure(state, "connect failed: " + conn_result.error().message());
         co_return;
     }
 
     const std::expected<MongoReply, MongoError> inserted =
-        co_await client.command(cfg.database, makeInsertCommand(collection, doc_id, 1));
+        co_await client.command(cfg.mongo.database, makeInsertCommand(collection, doc_id, 1));
     if (!inserted) {
         setFailure(state, "insert failed: " + inserted.error().message());
         co_return;
     }
 
     const std::expected<MongoReply, MongoError> found =
-        co_await client.command(cfg.database, makeFindCommand(collection, doc_id));
+        co_await client.command(cfg.mongo.database, makeFindCommand(collection, doc_id));
     if (!found) {
         setFailure(state, "find failed: " + found.error().message());
         co_return;
     }
 
     const std::expected<MongoReply, MongoError> updated =
-        co_await client.command(cfg.database, makeUpdateCommand(collection, doc_id, 2));
+        co_await client.command(cfg.mongo.database, makeUpdateCommand(collection, doc_id, 2));
     if (!updated) {
         setFailure(state, "update failed: " + updated.error().message());
         co_return;
     }
 
     const std::expected<MongoReply, MongoError> deleted =
-        co_await client.command(cfg.database, makeDeleteCommand(collection, doc_id));
+        co_await client.command(cfg.mongo.database, makeDeleteCommand(collection, doc_id));
     if (!deleted) {
         setFailure(state, "delete failed: " + deleted.error().message());
         co_return;
@@ -167,7 +172,7 @@ Coroutine run(IOScheduler* scheduler,
 
 int main()
 {
-    const auto cfg = mongo_example::loadMongoConfigFromEnv();
+    const auto mongo_cfg = mongo_example::loadMongoConfigFromEnv();
     const auto async_cfg = mongo_example::loadAsyncMongoConfigFromEnv();
 
     Runtime runtime;
@@ -181,7 +186,7 @@ int main()
     }
 
     RunState state;
-    scheduler->spawn(run(scheduler, &state, cfg, async_cfg));
+    scheduler->spawn(run(scheduler, &state, AsyncClientConfig{mongo_cfg, async_cfg}));
 
     using namespace std::chrono_literals;
     const auto deadline = std::chrono::steady_clock::now() + 10s;

@@ -23,6 +23,12 @@ struct AsyncAuthState
     std::string error;
 };
 
+struct AsyncClientConfig
+{
+    MongoConfig mongo;
+    AsyncMongoConfig async;
+};
+
 void setFailure(AsyncAuthState* state, std::string message)
 {
     state->ok.store(false, std::memory_order_relaxed);
@@ -32,18 +38,17 @@ void setFailure(AsyncAuthState* state, std::string message)
 
 Coroutine runAsyncAuth(IOScheduler* scheduler,
                        AsyncAuthState* state,
-                       MongoConfig cfg,
-                       AsyncMongoConfig async_cfg)
+                       AsyncClientConfig cfg)
 {
-    AsyncMongoClient client(scheduler, async_cfg);
+    AsyncMongoClient client(scheduler, cfg.async);
 
-    const std::expected<bool, MongoError> connected = co_await client.connect(cfg);
+    const std::expected<bool, MongoError> connected = co_await client.connect(cfg.mongo);
     if (!connected) {
         setFailure(state, "async connect failed: " + connected.error().message());
         co_return;
     }
 
-    const std::expected<MongoReply, MongoError> ping = co_await client.ping(cfg.database);
+    const std::expected<MongoReply, MongoError> ping = co_await client.ping(cfg.mongo.database);
     if (!ping) {
         setFailure(state, "async ping failed: " + ping.error().message());
         co_return;
@@ -105,7 +110,9 @@ int main()
     }
 
     AsyncAuthState state;
-    scheduler->spawn(runAsyncAuth(scheduler, &state, cfg, mongo_test::loadAsyncMongoTestConfig()));
+    scheduler->spawn(runAsyncAuth(scheduler,
+                                  &state,
+                                  AsyncClientConfig{cfg, mongo_test::loadAsyncMongoTestConfig()}));
 
     using namespace std::chrono_literals;
     const auto deadline = std::chrono::steady_clock::now() + 15s;

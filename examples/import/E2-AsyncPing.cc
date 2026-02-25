@@ -19,14 +19,19 @@ struct RunState
     std::string error;
 };
 
+struct AsyncClientConfig
+{
+    MongoConfig mongo;
+    AsyncMongoConfig async;
+};
+
 Coroutine run(IOScheduler* scheduler,
               RunState* state,
-              MongoConfig cfg,
-              AsyncMongoConfig async_cfg)
+              AsyncClientConfig cfg)
 {
-    AsyncMongoClient client(scheduler, async_cfg);
+    AsyncMongoClient client(scheduler, cfg.async);
 
-    const std::expected<bool, MongoError> conn_result = co_await client.connect(cfg);
+    const std::expected<bool, MongoError> conn_result = co_await client.connect(cfg.mongo);
     if (!conn_result) {
         state->ok.store(false, std::memory_order_relaxed);
         state->error = conn_result.error().message();
@@ -34,7 +39,7 @@ Coroutine run(IOScheduler* scheduler,
         co_return;
     }
 
-    const std::expected<MongoReply, MongoError> ping_result = co_await client.ping(cfg.database);
+    const std::expected<MongoReply, MongoError> ping_result = co_await client.ping(cfg.mongo.database);
     if (!ping_result) {
         state->ok.store(false, std::memory_order_relaxed);
         state->error = ping_result.error().message();
@@ -48,7 +53,7 @@ Coroutine run(IOScheduler* scheduler,
 
 int main()
 {
-    const auto cfg = mongo_example::loadMongoConfigFromEnv();
+    const auto mongo_cfg = mongo_example::loadMongoConfigFromEnv();
     const auto async_cfg = mongo_example::loadAsyncMongoConfigFromEnv();
 
     Runtime runtime;
@@ -62,7 +67,7 @@ int main()
     }
 
     RunState state;
-    scheduler->spawn(run(scheduler, &state, cfg, async_cfg));
+    scheduler->spawn(run(scheduler, &state, AsyncClientConfig{mongo_cfg, async_cfg}));
 
     using namespace std::chrono_literals;
     const auto deadline = std::chrono::steady_clock::now() + 10s;
