@@ -6,9 +6,8 @@
 
 #include <galay-kernel/kernel/Runtime.h>
 
-#include "example/common/ExampleConfig.h"
-
-import galay.mongo;
+#include "examples/common/ExampleConfig.h"
+#include "galay-mongo/async/AsyncMongoClient.h"
 
 using namespace galay::kernel;
 using namespace galay::mongo;

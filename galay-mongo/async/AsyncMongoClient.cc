@@ -1704,26 +1704,20 @@ AsyncMongoClient& AsyncMongoClient::operator=(AsyncMongoClient&& other) noexcept
         m_decode_scratch = std::move(other.m_decode_scratch);
         m_pipeline_reserve_per_command = other.m_pipeline_reserve_per_command;
         m_next_request_id = other.m_next_request_id;
-        m_connect_awaitable.reset();
-        m_command_awaitable.reset();
-        m_pipeline_awaitable.reset();
         m_logger = std::move(other.m_logger);
         other.m_is_closed = true;
     }
     return *this;
 }
 
-MongoConnectAwaitable& AsyncMongoClient::connect(MongoConfig config)
+MongoConnectAwaitable AsyncMongoClient::connect(MongoConfig config)
 {
-    if (!m_connect_awaitable.has_value() || m_connect_awaitable->isInvalid()) {
-        m_connect_awaitable.emplace(*this, std::move(config));
-    }
-    return *m_connect_awaitable;
+    return MongoConnectAwaitable(*this, std::move(config));
 }
 
-MongoConnectAwaitable& AsyncMongoClient::connect(std::string_view host,
-                                            uint16_t port,
-                                            std::string_view database)
+MongoConnectAwaitable AsyncMongoClient::connect(std::string_view host,
+                                                uint16_t port,
+                                                std::string_view database)
 {
     MongoConfig config;
     config.host.assign(host.data(), host.size());
@@ -1732,37 +1726,28 @@ MongoConnectAwaitable& AsyncMongoClient::connect(std::string_view host,
     return connect(std::move(config));
 }
 
-MongoCommandAwaitable& AsyncMongoClient::command(std::string database, MongoDocument command)
+MongoCommandAwaitable AsyncMongoClient::command(std::string database, MongoDocument command)
 {
-    if (!m_command_awaitable.has_value()) {
-        m_command_awaitable.emplace(*this);
+    MongoCommandAwaitable awaitable(*this);
+    if (awaitable.isInvalid()) {
+        awaitable.arm(std::move(database), std::move(command));
     }
-    if (m_command_awaitable->isInvalid()) {
-        m_command_awaitable->arm(std::move(database), std::move(command));
-    }
-    return *m_command_awaitable;
+    return awaitable;
 }
 
-MongoCommandAwaitable& AsyncMongoClient::ping(std::string database)
+MongoCommandAwaitable AsyncMongoClient::ping(std::string database)
 {
-    if (!m_command_awaitable.has_value()) {
-        m_command_awaitable.emplace(*this);
+    MongoCommandAwaitable awaitable(*this);
+    if (awaitable.isInvalid()) {
+        awaitable.armPing(std::move(database));
     }
-    if (m_command_awaitable->isInvalid()) {
-        m_command_awaitable->armPing(std::move(database));
-    }
-    return *m_command_awaitable;
+    return awaitable;
 }
 
-MongoPipelineAwaitable& AsyncMongoClient::pipeline(std::string database,
-                                              std::vector<MongoDocument> commands)
+MongoPipelineAwaitable AsyncMongoClient::pipeline(std::string database,
+                                                  std::vector<MongoDocument> commands)
 {
-    if (!m_pipeline_awaitable.has_value()) {
-        m_pipeline_awaitable.emplace(*this, std::move(database), std::move(commands));
-    } else if (m_pipeline_awaitable->isInvalid()) {
-        m_pipeline_awaitable->arm(std::move(database), std::move(commands));
-    }
-    return *m_pipeline_awaitable;
+    return MongoPipelineAwaitable(*this, std::move(database), std::move(commands));
 }
 
 } // namespace galay::mongo

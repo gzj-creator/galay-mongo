@@ -6,7 +6,7 @@
 
 #include <galay-kernel/kernel/Runtime.h>
 
-#include "example/common/ExampleConfig.h"
+#include "examples/common/ExampleConfig.h"
 
 import galay.mongo;
 

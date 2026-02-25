@@ -1,8 +1,9 @@
 #include <chrono>
 #include <iostream>
 
-#include "example/common/ExampleConfig.h"
-#include "galay-mongo/sync/MongoClient.h"
+#include "examples/common/ExampleConfig.h"
+
+import galay.mongo;
 
 using namespace galay::mongo;
 

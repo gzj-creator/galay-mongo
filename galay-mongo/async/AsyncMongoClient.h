@@ -297,15 +297,15 @@ public:
 
     ~AsyncMongoClient() = default;
 
-    MongoConnectAwaitable& connect(MongoConfig config);
-    MongoConnectAwaitable& connect(std::string_view host,
-                                   uint16_t port,
-                                   std::string_view database = "admin");
+    MongoConnectAwaitable connect(MongoConfig config);
+    MongoConnectAwaitable connect(std::string_view host,
+                                  uint16_t port,
+                                  std::string_view database = "admin");
 
-    MongoCommandAwaitable& command(std::string database, MongoDocument command);
-    MongoCommandAwaitable& ping(std::string database = "admin");
-    MongoPipelineAwaitable& pipeline(std::string database,
-                                     std::vector<MongoDocument> commands);
+    MongoCommandAwaitable command(std::string database, MongoDocument command);
+    MongoCommandAwaitable ping(std::string database = "admin");
+    MongoPipelineAwaitable pipeline(std::string database,
+                                    std::vector<MongoDocument> commands);
 
     auto close()
     {
@@ -337,10 +337,6 @@ private:
     std::string m_decode_scratch;
     size_t m_pipeline_reserve_per_command = 96;
     int32_t m_next_request_id = 1;
-
-    std::optional<MongoConnectAwaitable> m_connect_awaitable;
-    std::optional<MongoCommandAwaitable> m_command_awaitable;
-    std::optional<MongoPipelineAwaitable> m_pipeline_awaitable;
 
     MongoLogger m_logger;
 };

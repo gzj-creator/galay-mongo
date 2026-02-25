@@ -1,6 +1,6 @@
 #include <iostream>
 
-#include "example/common/ExampleConfig.h"
+#include "examples/common/ExampleConfig.h"
 #include "galay-mongo/sync/MongoClient.h"
 
 using namespace galay::mongo;

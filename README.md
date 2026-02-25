@@ -15,12 +15,16 @@
 
 ## 文档导航
 
-建议从 `docs/03-使用指南.md` 开始：
+建议从快速开始文档开始：
 
-1. [架构设计](docs/01-架构设计.md)
-2. [API参考](docs/02-API参考.md)
-3. [使用指南](docs/03-使用指南.md)
-4. [性能测试](docs/04-性能测试.md)
+1. [快速开始](docs/05-快速开始.md) - 依赖安装、编译构建、运行测试和示例
+2. [架构设计](docs/01-架构设计.md) - 分层架构、BSON 协议、异步 Pipeline、性能考量
+3. [API 参考](docs/02-API参考.md) - 完整 API 参考、使用注意事项
+4. [使用指南](docs/03-使用指南.md) - 环境配置、示例运行、代码使用
+5. [性能测试](docs/04-性能测试.md) - 性能测试结果、优化建议
+6. [示例代码](docs/06-示例代码.md) - 同步/异步 CRUD、Pipeline、认证、聚合、索引
+7. [高级主题](docs/07-高级主题.md) - 性能优化、超时策略、聚合管道、索引管理、安全性
+8. [常见问题](docs/08-常见问题.md) - 编译、连接、查询、认证、异步、性能等常见问题解答
 
 ## 依赖
 
@@ -152,21 +156,21 @@ cmake --build build --parallel
 常用 include 示例：
 
 ```bash
-./build/example/E1-SyncPing-Include
-./build/example/E2-AsyncPing-Include
-./build/example/E3-SyncCrud-Include
-./build/example/E4-AsyncPipeline-Include
-./build/example/E5-AsyncCommandCrud-Include
+./build/examples/E1-SyncPing-Include
+./build/examples/E2-AsyncPing-Include
+./build/examples/E3-SyncCrud-Include
+./build/examples/E4-AsyncPipeline-Include
+./build/examples/E5-AsyncCommandCrud-Include
 ```
 
 模块 import 示例（仅在 `GALAY_MONGO_BUILD_MODULE_EXAMPLES_EFFECTIVE=ON` 时生成）：
 
 ```bash
-./build/example/E1-SyncPing-Import
-./build/example/E2-AsyncPing-Import
-./build/example/E3-SyncCrud-Import
-./build/example/E4-AsyncPipeline-Import
-./build/example/E5-AsyncCommandCrud-Import
+./build/examples/E1-SyncPing-Import
+./build/examples/E2-AsyncPing-Import
+./build/examples/E3-SyncCrud-Import
+./build/examples/E4-AsyncPipeline-Import
+./build/examples/E5-AsyncCommandCrud-Import
 ```
 
 ## Benchmark
