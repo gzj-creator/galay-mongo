@@ -130,7 +130,7 @@ Coroutine runAsyncFunctional(IOScheduler* scheduler,
                              AsyncFunctionalState* state,
                              AsyncClientConfig cfg)
 {
-    AsyncMongoClient client(scheduler, cfg.async);
+    auto client = AsyncMongoClientBuilder().scheduler(scheduler).config(cfg.async).build();
 
     const std::string database = cfg.mongo.database;
     const std::string collection = "galay_mongo_async_functional";

@@ -88,7 +88,7 @@ Coroutine runWorker(IOScheduler* scheduler,
                     mongo_bench::BenchConfig cfg,
                     size_t worker_count)
 {
-    AsyncMongoClient client(scheduler);
+    auto client = AsyncMongoClientBuilder().scheduler(scheduler).build();
     if (auto logger = client.logger().get()) {
         logger->set_level(spdlog::level::err);
     }

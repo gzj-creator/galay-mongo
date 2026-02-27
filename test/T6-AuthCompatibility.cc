@@ -40,7 +40,7 @@ Coroutine runAsyncAuth(IOScheduler* scheduler,
                        AsyncAuthState* state,
                        AsyncClientConfig cfg)
 {
-    AsyncMongoClient client(scheduler, cfg.async);
+    auto client = AsyncMongoClientBuilder().scheduler(scheduler).config(cfg.async).build();
 
     const std::expected<bool, MongoError> connected = co_await client.connect(cfg.mongo);
     if (!connected) {

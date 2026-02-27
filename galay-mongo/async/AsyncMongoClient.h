@@ -13,6 +13,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "AsyncMongoConfig.h"
@@ -38,6 +39,63 @@ using galay::kernel::RingBuffer;
 using galay::kernel::SendIOContext;
 
 class AsyncMongoClient;
+
+class AsyncMongoClientBuilder
+{
+public:
+    AsyncMongoClientBuilder& scheduler(IOScheduler* scheduler)
+    {
+        m_scheduler = scheduler;
+        return *this;
+    }
+
+    AsyncMongoClientBuilder& config(AsyncMongoConfig config)
+    {
+        m_config = std::move(config);
+        return *this;
+    }
+
+    AsyncMongoClientBuilder& sendTimeout(std::chrono::milliseconds timeout)
+    {
+        m_config.send_timeout = timeout;
+        return *this;
+    }
+
+    AsyncMongoClientBuilder& recvTimeout(std::chrono::milliseconds timeout)
+    {
+        m_config.recv_timeout = timeout;
+        return *this;
+    }
+
+    AsyncMongoClientBuilder& bufferSize(size_t size)
+    {
+        m_config.buffer_size = size;
+        return *this;
+    }
+
+    AsyncMongoClientBuilder& pipelineReservePerCommand(size_t reserve)
+    {
+        m_config.pipeline_reserve_per_command = reserve;
+        return *this;
+    }
+
+    AsyncMongoClientBuilder& loggerName(std::string logger_name)
+    {
+        m_config.logger_name = std::move(logger_name);
+        return *this;
+    }
+
+    AsyncMongoClient build() const;
+
+    AsyncMongoConfig buildConfig() const
+    {
+        return m_config;
+    }
+
+private:
+    IOScheduler* m_scheduler = nullptr;
+    AsyncMongoConfig m_config = AsyncMongoConfig::noTimeout();
+};
 
 /// 异步连接 awaitable，处理 TCP 连接 + hello 握手 + SCRAM-SHA-256 认证的完整流程
 /// co_await 后返回 std::expected<bool, MongoError>，true 表示连接成功
@@ -341,6 +399,11 @@ private:
 
     MongoLogger m_logger;
 };
+
+inline galay::mongo::AsyncMongoClient galay::mongo::AsyncMongoClientBuilder::build() const
+{
+    return AsyncMongoClient(m_scheduler, m_config);
+}
 
 } // namespace galay::mongo
 

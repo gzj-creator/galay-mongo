@@ -126,7 +126,7 @@ Coroutine run(IOScheduler* scheduler,
               RunState* state,
               AsyncClientConfig cfg)
 {
-    AsyncMongoClient client(scheduler, cfg.async);
+    auto client = AsyncMongoClientBuilder().scheduler(scheduler).config(cfg.async).build();
 
     const std::string collection = "galay_mongo_example_async_command_crud";
     const int64_t doc_id = makeUniqueId();
