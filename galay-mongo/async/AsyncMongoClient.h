@@ -190,6 +190,7 @@ private:
     AsyncMongoClient& m_client;
     std::string m_encoded_request;
     size_t m_sent = 0;
+    int32_t m_request_id = 0;
     Lifecycle m_lifecycle = Lifecycle::Invalid;
     Step m_step = Step::Sending;
     std::optional<MongoReply> m_reply;
@@ -319,7 +320,7 @@ public:
     int32_t nextRequestId();
     MongoLogger& logger() { return m_logger; }
     const MongoLogger& logger() const { return m_logger; }
-    void setLogger(std::shared_ptr<spdlog::logger> logger)
+    void setLogger(MongoLoggerPtr logger)
     {
         m_logger.set(std::move(logger));
     }

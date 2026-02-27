@@ -1191,11 +1191,13 @@ void MongoCommandAwaitable::arm(std::string database, MongoDocument command)
             protocol::MongoProtocol::appendOpMsg(m_ping_encoded_template, 0, command);
         }
         m_encoded_request = m_ping_encoded_template;
-        patchRequestId(m_encoded_request, m_client.nextRequestId());
+        m_request_id = m_client.nextRequestId();
+        patchRequestId(m_encoded_request, m_request_id);
     } else {
         m_encoded_request.clear();
+        m_request_id = m_client.nextRequestId();
         protocol::MongoProtocol::appendOpMsg(m_encoded_request,
-                                             m_client.nextRequestId(),
+                                             m_request_id,
                                              command);
     }
 
@@ -1222,7 +1224,8 @@ void MongoCommandAwaitable::armPing(std::string database)
     }
 
     m_encoded_request = m_ping_encoded_template;
-    patchRequestId(m_encoded_request, m_client.nextRequestId());
+    m_request_id = m_client.nextRequestId();
+    patchRequestId(m_encoded_request, m_request_id);
 
     m_tasks.clear();
     m_cursor = 0;
@@ -1265,6 +1268,11 @@ std::expected<bool, MongoError> MongoCommandAwaitable::tryParseFromRingBuffer()
         protocol::MongoProtocol::decodeMessage(view.data, static_cast<size_t>(view.msg_len));
     if (!message) {
         return std::unexpected(message.error());
+    }
+
+    if (message->header.response_to != m_request_id) {
+        return std::unexpected(MongoError(MONGO_ERROR_PROTOCOL,
+                                          "Response responseTo does not match sent requestId"));
     }
 
     m_client.m_ring_buffer.consume(static_cast<size_t>(view.msg_len));
@@ -1698,6 +1706,10 @@ AsyncMongoClient::AsyncMongoClient(AsyncMongoClient&& other) noexcept
 AsyncMongoClient& AsyncMongoClient::operator=(AsyncMongoClient&& other) noexcept
 {
     if (this != &other) {
+        if (!m_is_closed) {
+            m_is_closed = true;
+            m_socket.close();
+        }
         m_is_closed = other.m_is_closed;
         m_socket = std::move(other.m_socket);
         m_ring_buffer = std::move(other.m_ring_buffer);

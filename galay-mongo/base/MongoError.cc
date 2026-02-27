@@ -49,6 +49,7 @@ std::string MongoError::message() const
     case MONGO_ERROR_BUFFER_OVERFLOW:   base = "Buffer overflow"; break;
     case MONGO_ERROR_INVALID_PARAM:     base = "Invalid parameter"; break;
     case MONGO_ERROR_UNSUPPORTED:       base = "Unsupported feature"; break;
+    default:                            base = "Unknown error"; break;
     }
 
     if (m_server_code != 0) {

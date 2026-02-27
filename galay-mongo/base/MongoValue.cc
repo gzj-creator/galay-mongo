@@ -64,8 +64,44 @@ MongoValue::MongoValue(MongoArray value)
 {
 }
 
+MongoValue::MongoValue(ObjectIdTag, std::string oid)
+    : m_storage(std::move(oid))
+    , m_type_tag(MongoValueType::ObjectId)
+{
+}
+
+MongoValue::MongoValue(DateTimeTag, int64_t millis)
+    : m_storage(millis)
+    , m_type_tag(MongoValueType::DateTime)
+{
+}
+
+MongoValue::MongoValue(TimestampTag, uint64_t ts)
+    : m_storage(static_cast<int64_t>(ts))
+    , m_type_tag(MongoValueType::Timestamp)
+{
+}
+
+MongoValue MongoValue::fromObjectId(std::string oid)
+{
+    return MongoValue(ObjectIdTag{}, std::move(oid));
+}
+
+MongoValue MongoValue::fromDateTime(int64_t millis)
+{
+    return MongoValue(DateTimeTag{}, millis);
+}
+
+MongoValue MongoValue::fromTimestamp(uint64_t ts)
+{
+    return MongoValue(TimestampTag{}, ts);
+}
+
 MongoValueType MongoValue::type() const
 {
+    if (m_type_tag == MongoValueType::ObjectId) return MongoValueType::ObjectId;
+    if (m_type_tag == MongoValueType::DateTime) return MongoValueType::DateTime;
+    if (m_type_tag == MongoValueType::Timestamp) return MongoValueType::Timestamp;
     if (std::holds_alternative<std::nullptr_t>(m_storage)) return MongoValueType::Null;
     if (std::holds_alternative<bool>(m_storage)) return MongoValueType::Bool;
     if (std::holds_alternative<int32_t>(m_storage)) return MongoValueType::Int32;
@@ -86,6 +122,9 @@ bool MongoValue::isString() const { return std::holds_alternative<std::string>(m
 bool MongoValue::isBinary() const { return std::holds_alternative<Binary>(m_storage); }
 bool MongoValue::isDocument() const { return std::holds_alternative<DocumentPtr>(m_storage); }
 bool MongoValue::isArray() const { return std::holds_alternative<ArrayPtr>(m_storage); }
+bool MongoValue::isObjectId() const { return m_type_tag == MongoValueType::ObjectId; }
+bool MongoValue::isDateTime() const { return m_type_tag == MongoValueType::DateTime; }
+bool MongoValue::isTimestamp() const { return m_type_tag == MongoValueType::Timestamp; }
 
 bool MongoValue::toBool(bool default_value) const
 {

@@ -27,6 +27,9 @@ enum class MongoValueType : uint8_t
     Binary,     ///< 二进制数据
     Document,   ///< 嵌套文档
     Array,      ///< 数组
+    ObjectId,   ///< 12 字节 ObjectId
+    DateTime,   ///< UTC 日期时间（毫秒时间戳）
+    Timestamp,  ///< MongoDB 内部时间戳
 };
 
 /// BSON 值的通用容器，支持 Null/Bool/Int32/Int64/Double/String/Binary/Document/Array
@@ -48,6 +51,13 @@ public:
     MongoValue(MongoDocument value);    ///< 构造嵌套 Document 值
     MongoValue(MongoArray value);       ///< 构造 Array 值
 
+    /// @name 工厂方法（用于 BSON 特殊类型，保留类型信息）
+    /// @{
+    static MongoValue fromObjectId(std::string oid);
+    static MongoValue fromDateTime(int64_t millis);
+    static MongoValue fromTimestamp(uint64_t ts);
+    /// @}
+
     /// 返回当前值的类型
     MongoValueType type() const;
 
@@ -62,6 +72,9 @@ public:
     bool isBinary() const;
     bool isDocument() const;
     bool isArray() const;
+    bool isObjectId() const;
+    bool isDateTime() const;
+    bool isTimestamp() const;
     /// @}
 
     /// @name 值提取（类型不匹配时返回默认值或空引用）
@@ -96,6 +109,14 @@ private:
                                  ArrayPtr>;
 
     Storage m_storage;
+    MongoValueType m_type_tag = MongoValueType::Null;
+
+    struct ObjectIdTag {};
+    struct DateTimeTag {};
+    struct TimestampTag {};
+    MongoValue(ObjectIdTag, std::string oid);
+    MongoValue(DateTimeTag, int64_t millis);
+    MongoValue(TimestampTag, uint64_t ts);
 
     static const std::string kEmptyString;
     static const Binary kEmptyBinary;

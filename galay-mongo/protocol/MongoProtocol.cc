@@ -101,16 +101,21 @@ std::expected<MongoMessage, MongoError> MongoProtocol::decodeMessage(const char*
     message.flags = readInt32LE(data + pos);
     pos += 4;
 
+    // If checksumPresent bit is set, the last 4 bytes are a CRC32 checksum
+    const size_t parseable_end = (message.flags & 0x01)
+        ? static_cast<size_t>(message.header.message_length) - 4
+        : static_cast<size_t>(message.header.message_length);
+
     bool body_found = false;
 
-    while (pos < static_cast<size_t>(message.header.message_length)) {
+    while (pos < parseable_end) {
         const auto section_kind = static_cast<uint8_t>(data[pos++]);
 
         if (section_kind == 0) {
             size_t consumed = 0;
             auto document_or_err = BsonCodec::decodeDocument(
                 data + pos,
-                static_cast<size_t>(message.header.message_length) - pos,
+                parseable_end - pos,
                 consumed);
             if (!document_or_err) {
                 return std::unexpected(MongoError(MONGO_ERROR_PROTOCOL,
@@ -124,7 +129,7 @@ std::expected<MongoMessage, MongoError> MongoProtocol::decodeMessage(const char*
         }
 
         if (section_kind == 1) {
-            if (pos + 4 > static_cast<size_t>(message.header.message_length)) {
+            if (pos + 4 > parseable_end) {
                 return std::unexpected(MongoError(MONGO_ERROR_PROTOCOL,
                                                   "Invalid OP_MSG section(1) header"));
             }
@@ -135,7 +140,7 @@ std::expected<MongoMessage, MongoError> MongoProtocol::decodeMessage(const char*
                                                   "Invalid OP_MSG section(1) size"));
             }
 
-            if (pos + static_cast<size_t>(section_size) > static_cast<size_t>(message.header.message_length)) {
+            if (pos + static_cast<size_t>(section_size) > parseable_end) {
                 return std::unexpected(MongoError(MONGO_ERROR_PROTOCOL,
                                                   "Incomplete OP_MSG section(1)"));
             }

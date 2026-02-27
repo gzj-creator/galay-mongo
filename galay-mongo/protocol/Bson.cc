@@ -168,6 +168,9 @@ void BsonCodec::writeDouble(std::string& out, double value)
 
 void BsonCodec::writeCString(std::string& out, const std::string& value)
 {
+    if (value.find('\0') != std::string::npos) {
+        throw std::invalid_argument("BSON CString must not contain embedded NUL bytes");
+    }
     out.append(value);
     out.push_back('\0');
 }
@@ -280,6 +283,34 @@ void BsonCodec::encodeElement(std::string& out, const std::string& key, const Mo
         writeCString(out, key);
         writeInt64(out, value.toInt64());
         break;
+    case MongoValueType::ObjectId: {
+        out.push_back(static_cast<char>(BsonType::ObjectId));
+        writeCString(out, key);
+        // Decode 24-char hex string back to 12 raw bytes
+        const auto& oid_hex = value.toString();
+        for (size_t i = 0; i + 1 < oid_hex.size(); i += 2) {
+            auto hi = static_cast<uint8_t>(oid_hex[i]);
+            auto lo = static_cast<uint8_t>(oid_hex[i + 1]);
+            auto hex_to_nibble = [](uint8_t c) -> uint8_t {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+                if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+                return 0;
+            };
+            out.push_back(static_cast<char>((hex_to_nibble(hi) << 4) | hex_to_nibble(lo)));
+        }
+        break;
+    }
+    case MongoValueType::DateTime:
+        out.push_back(static_cast<char>(BsonType::DateTime));
+        writeCString(out, key);
+        writeInt64(out, value.toInt64());
+        break;
+    case MongoValueType::Timestamp:
+        out.push_back(static_cast<char>(BsonType::Timestamp));
+        writeCString(out, key);
+        writeInt64(out, value.toInt64());
+        break;
     }
 }
 
@@ -358,10 +389,17 @@ std::expected<MongoValue, std::string> BsonCodec::decodeElementValue(BsonType ty
         if (pos + 12 > len) {
             return std::unexpected("BSON ObjectId out of range");
         }
-        MongoValue::Binary object_id(12);
-        std::memcpy(object_id.data(), data + pos, 12);
+        // Encode 12 raw bytes as 24-char hex string
+        static constexpr char hex_chars[] = "0123456789abcdef";
+        std::string oid;
+        oid.reserve(24);
+        for (size_t i = 0; i < 12; ++i) {
+            const auto byte = static_cast<uint8_t>(data[pos + i]);
+            oid.push_back(hex_chars[byte >> 4]);
+            oid.push_back(hex_chars[byte & 0x0F]);
+        }
         pos += 12;
-        return MongoValue(std::move(object_id));
+        return MongoValue::fromObjectId(std::move(oid));
     }
     case BsonType::Bool: {
         if (pos + 1 > len) {
@@ -374,7 +412,7 @@ std::expected<MongoValue, std::string> BsonCodec::decodeElementValue(BsonType ty
         auto ts = readInt64(data, len, pos);
         if (!ts) return std::unexpected(ts.error());
         pos += 8;
-        return MongoValue(ts.value());
+        return MongoValue::fromDateTime(ts.value());
     }
     case BsonType::Null:
         return MongoValue(nullptr);
@@ -388,7 +426,7 @@ std::expected<MongoValue, std::string> BsonCodec::decodeElementValue(BsonType ty
         auto ts = readInt64(data, len, pos);
         if (!ts) return std::unexpected(ts.error());
         pos += 8;
-        return MongoValue(ts.value());
+        return MongoValue::fromTimestamp(static_cast<uint64_t>(ts.value()));
     }
     case BsonType::Int64: {
         auto i64 = readInt64(data, len, pos);
