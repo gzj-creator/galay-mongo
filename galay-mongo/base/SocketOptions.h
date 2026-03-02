@@ -2,6 +2,7 @@
 #define GALAY_MONGO_BASE_SOCKET_OPTIONS_H
 
 #include <cstdint>
+#include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <sys/time.h>
