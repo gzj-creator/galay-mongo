@@ -51,14 +51,33 @@ void MongoProtocol::appendOpMsg(std::string& out,
                                 const MongoDocument& body,
                                 int32_t flags)
 {
-    const std::string bson = BsonCodec::encodeDocument(body);
     const size_t base = out.size();
-    out.reserve(base + 16 + 4 + 1 + bson.size());
+    out.reserve(base + 16 + 4 + 1 + 64);
     out.resize(base + 16, '\0');
 
     appendInt32LE(out, flags);
     out.push_back(static_cast<char>(0));
-    out.append(bson);
+    BsonCodec::appendDocument(out, body);
+
+    writeInt32LEAt(out, base + 0, static_cast<int32_t>(out.size() - base));
+    writeInt32LEAt(out, base + 4, request_id);
+    writeInt32LEAt(out, base + 8, 0); // responseTo for request
+    writeInt32LEAt(out, base + 12, kMongoOpMsg);
+}
+
+void MongoProtocol::appendOpMsgWithDatabase(std::string& out,
+                                            int32_t request_id,
+                                            const MongoDocument& body,
+                                            std::string_view database,
+                                            int32_t flags)
+{
+    const size_t base = out.size();
+    out.reserve(base + 16 + 4 + 1 + 64 + database.size());
+    out.resize(base + 16, '\0');
+
+    appendInt32LE(out, flags);
+    out.push_back(static_cast<char>(0));
+    BsonCodec::appendDocumentWithDatabase(out, body, database);
 
     writeInt32LEAt(out, base + 0, static_cast<int32_t>(out.size() - base));
     writeInt32LEAt(out, base + 4, request_id);

@@ -7,6 +7,8 @@
 #include <galay-kernel/kernel/Runtime.h>
 
 #include "galay-mongo/async/AsyncMongoClient.h"
+#include "galay-mongo/async/MongoBufferProvider.h"
+#include "galay-mongo/protocol/Builder.h"
 #include "test/TestMongoConfig.h"
 
 using namespace galay::kernel;
@@ -29,7 +31,11 @@ Coroutine runPipelineTest(IOScheduler* scheduler,
                           PipelineTestState* state,
                           AsyncClientConfig cfg)
 {
-    auto client = AsyncMongoClientBuilder().scheduler(scheduler).config(cfg.async).build();
+    auto client = AsyncMongoClientBuilder()
+        .scheduler(scheduler)
+        .config(cfg.async)
+        .bufferProvider(std::make_shared<MongoRingBufferProvider>(cfg.async.buffer_size))
+        .build();
 
     const std::expected<bool, MongoError> conn_result =
         co_await client.connect(std::move(cfg.mongo));
@@ -40,23 +46,14 @@ Coroutine runPipelineTest(IOScheduler* scheduler,
         co_return;
     }
 
-    std::vector<MongoDocument> commands;
+    protocol::MongoCommandBuilder commands;
     commands.reserve(3);
-
-    MongoDocument ping1;
-    ping1.append("ping", int32_t(1));
-    commands.push_back(std::move(ping1));
-
-    MongoDocument invalid;
-    invalid.append("galayUnknownCommand", int32_t(1));
-    commands.push_back(std::move(invalid));
-
-    MongoDocument ping2;
-    ping2.append("ping", int32_t(1));
-    commands.push_back(std::move(ping2));
+    commands.append("ping", int32_t(1));
+    commands.append("galayUnknownCommand", int32_t(1));
+    commands.append("ping", int32_t(1));
 
     const std::expected<std::vector<MongoPipelineResponse>, MongoError> pipeline_result =
-        co_await client.pipeline("admin", std::move(commands));
+        co_await client.pipeline("admin", commands.commands());
     if (!pipeline_result) {
         state->ok.store(false, std::memory_order_relaxed);
         state->error = "pipeline failed: " + pipeline_result.error().message();

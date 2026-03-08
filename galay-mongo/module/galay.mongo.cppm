@@ -5,6 +5,7 @@ module;
 #include "galay-mongo/base/MongoError.h"
 #include "galay-mongo/base/MongoLog.h"
 #include "galay-mongo/base/MongoValue.h"
+#include "galay-mongo/protocol/Builder.h"
 #include "galay-mongo/async/AsyncMongoConfig.h"
 #include "galay-mongo/async/AsyncMongoClient.h"
 #include "galay-mongo/sync/MongoClient.h"
@@ -20,6 +21,7 @@ export using ::galay::mongo::MongoValue;
 export using ::galay::mongo::MongoDocument;
 export using ::galay::mongo::MongoArray;
 export using ::galay::mongo::MongoReply;
+export using ::galay::mongo::protocol::MongoCommandBuilder;
 export using ::galay::mongo::AsyncMongoConfig;
 export using ::galay::mongo::MongoConnectAwaitable;
 export using ::galay::mongo::MongoCommandAwaitable;

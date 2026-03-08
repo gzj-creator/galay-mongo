@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <string_view>
 #include <string>
 
 namespace galay::mongo::protocol
@@ -34,6 +35,12 @@ class BsonCodec
 public:
     /// 将 MongoDocument 编码为 BSON 二进制数据
     static std::string encodeDocument(const MongoDocument& document);
+    /// 将 MongoDocument 直接追加编码到现有缓冲区尾部，避免中间临时字符串
+    static void appendDocument(std::string& out, const MongoDocument& document);
+    /// 将 MongoDocument 追加编码到缓冲区；若原文档缺少 `$db` 字段则按需补齐
+    static void appendDocumentWithDatabase(std::string& out,
+                                           const MongoDocument& document,
+                                           std::string_view database);
 
     /// 从 BSON 二进制数据解码为 MongoDocument
     /// @param data 数据指针
@@ -53,14 +60,14 @@ private:
     static void writeInt32(std::string& out, int32_t value);
     static void writeInt64(std::string& out, int64_t value);
     static void writeDouble(std::string& out, double value);
-    static void writeCString(std::string& out, const std::string& value);
+    static void writeCString(std::string& out, std::string_view value);
 
     static std::expected<int32_t, std::string> readInt32(const char* data, size_t len, size_t pos);
     static std::expected<int64_t, std::string> readInt64(const char* data, size_t len, size_t pos);
     static std::expected<double, std::string> readDouble(const char* data, size_t len, size_t pos);
     static std::expected<std::string, std::string> readCString(const char* data, size_t len, size_t& pos);
 
-    static void encodeElement(std::string& out, const std::string& key, const MongoValue& value);
+    static void encodeElement(std::string& out, std::string_view key, const MongoValue& value);
     static std::expected<MongoValue, std::string> decodeElementValue(BsonType type,
                                                                       const char* data,
                                                                       size_t len,

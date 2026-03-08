@@ -1,5 +1,6 @@
 #include "AsyncMongoClient.h"
 #include "galay-mongo/base/SocketOptions.h"
+#include "galay-mongo/protocol/Builder.h"
 
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -11,6 +12,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <span>
 #include <unordered_map>
 
 namespace galay::mongo
@@ -35,13 +37,6 @@ void writeInt32LE(char* p, int32_t value)
     p[1] = static_cast<char>((u >> 8) & 0xFF);
     p[2] = static_cast<char>((u >> 16) & 0xFF);
     p[3] = static_cast<char>((u >> 24) & 0xFF);
-}
-
-void patchRequestId(std::string& encoded_request, int32_t request_id)
-{
-    if (encoded_request.size() >= 8) {
-        writeInt32LE(encoded_request.data() + 4, request_id);
-    }
 }
 
 MongoError mapIoError(const IOError& io_error, MongoErrorType fallback)
@@ -313,7 +308,7 @@ struct DecodeView
 constexpr size_t kAsyncMaxMessageSize = 128 * 1024 * 1024;
 
 std::expected<std::optional<DecodeView>, MongoError>
-prepareDecodeView(const std::vector<struct iovec>& read_iovecs, std::string& parse_buffer)
+prepareDecodeView(std::span<const struct iovec> read_iovecs, std::string& parse_buffer)
 {
     if (read_iovecs.empty()) {
         return std::optional<DecodeView>{};
@@ -383,18 +378,93 @@ prepareDecodeView(const std::vector<struct iovec>& read_iovecs, std::string& par
     return std::optional<DecodeView>(DecodeView{parse_buffer.data(), msg_len});
 }
 
+struct SendSegment
+{
+    const char* data = nullptr;
+    size_t len = 0;
+};
+
+std::array<struct iovec, 1>& emptyIovecs()
+{
+    static std::array<struct iovec, 1> empty{};
+    return empty;
+}
+
+void fillSendIovecsFromSegments(std::vector<struct iovec>& iovecs,
+                                std::span<const SendSegment> segments,
+                                size_t sent)
+{
+    iovecs.clear();
+    size_t skip = sent;
+
+    for (const auto& segment : segments) {
+        if (segment.data == nullptr || segment.len == 0) {
+            continue;
+        }
+        if (skip >= segment.len) {
+            skip -= segment.len;
+            continue;
+        }
+
+        iovecs.push_back(iovec{
+            const_cast<char*>(segment.data + skip),
+            segment.len - skip
+        });
+        skip = 0;
+    }
+}
+
+void fillSendIovecsFromPayload(std::vector<struct iovec>& iovecs,
+                               const std::string& payload,
+                               size_t sent)
+{
+    iovecs.clear();
+    if (sent >= payload.size()) {
+        return;
+    }
+
+    iovecs.push_back(iovec{
+        const_cast<char*>(payload.data() + sent),
+        payload.size() - sent
+    });
+}
+
+bool fillReadIovecs(MongoBufferHandle& buffer_handle,
+                    std::vector<struct iovec>& iovecs)
+{
+    struct iovec raw_iovecs[2];
+    const size_t count = buffer_handle.getWriteIovecs(raw_iovecs, 2);
+    iovecs.clear();
+    iovecs.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        if (raw_iovecs[i].iov_len == 0) {
+            continue;
+        }
+        iovecs.push_back(raw_iovecs[i]);
+    }
+    return !iovecs.empty();
+}
+
 bool isSimplePingCommand(const MongoDocument& command, const std::string& database)
 {
-    if (command.size() != 2) {
+    if (command.empty() || command.size() > 2) {
         return false;
     }
 
     const MongoValue* ping = command.find("ping");
-    const MongoValue* db = command.find("$db");
-    if (ping == nullptr || db == nullptr) {
+    if (ping == nullptr) {
         return false;
     }
-    if (!db->isString() || db->toString() != database) {
+
+    const MongoValue* db = command.find("$db");
+    if (db != nullptr) {
+        if (command.size() != 2) {
+            return false;
+        }
+        if (!db->isString() || db->toString() != database) {
+            return false;
+        }
+    } else if (command.size() != 1) {
         return false;
     }
 
@@ -415,9 +485,23 @@ bool isSimplePingCommand(const MongoDocument& command, const std::string& databa
 MongoConnectAwaitable::ProtocolFlowAwaitable::ProtocolFlowAwaitable(MongoConnectAwaitable* owner)
     : m_owner(owner)
     , m_connect_ctx(Host(IPType::IPV4, owner->m_config.host, owner->m_config.port))
-    , m_send_ctx(nullptr, 0)
-    , m_recv_ctx({})
+    , m_send_ctx(emptyIovecs(), 0)
+    , m_recv_ctx(emptyIovecs(), 0)
 {
+    m_send_iovecs.reserve(1);
+    m_recv_iovecs.reserve(2);
+    syncSendContextIovecs();
+    syncRecvContextIovecs();
+}
+
+void MongoConnectAwaitable::ProtocolFlowAwaitable::syncSendContextIovecs()
+{
+    m_send_ctx.m_iovecs = std::span<const struct iovec>(m_send_iovecs.data(), m_send_iovecs.size());
+}
+
+void MongoConnectAwaitable::ProtocolFlowAwaitable::syncRecvContextIovecs()
+{
+    m_recv_ctx.m_iovecs = std::span<const struct iovec>(m_recv_iovecs.data(), m_recv_iovecs.size());
 }
 
 IOEventType MongoConnectAwaitable::ProtocolFlowAwaitable::type() const
@@ -430,9 +514,9 @@ IOEventType MongoConnectAwaitable::ProtocolFlowAwaitable::type() const
     case Step::Connecting:
         return IOEventType::CONNECT;
     case Step::Sending:
-        return IOEventType::SEND;
+        return IOEventType::WRITEV;
     case Step::Receiving:
-        return IOEventType::RECV;
+        return IOEventType::READV;
     }
 
     return IOEventType::INVALID;
@@ -476,12 +560,13 @@ bool MongoConnectAwaitable::ProtocolFlowAwaitable::handleSendResult()
 
 bool MongoConnectAwaitable::ProtocolFlowAwaitable::prepareReadIovecs()
 {
-    m_recv_ctx.m_iovecs = m_owner->m_client.m_ring_buffer.getWriteIovecs();
-    if (m_recv_ctx.m_iovecs.empty() || m_recv_ctx.m_iovecs.front().iov_len == 0) {
+    if (!fillReadIovecs(m_owner->m_client.m_ring_buffer, m_recv_iovecs)) {
         m_owner->setError(MongoError(MONGO_ERROR_RECV,
                                      "No writable ring buffer space while receiving connect/auth reply"));
+        syncRecvContextIovecs();
         return false;
     }
+    syncRecvContextIovecs();
     return true;
 }
 
@@ -547,8 +632,10 @@ bool MongoConnectAwaitable::ProtocolFlowAwaitable::handleComplete(struct io_urin
             m_owner->m_step = Step::Receiving;
             return false;
         }
-        m_send_ctx.m_buffer = m_owner->m_encoded_request.data() + m_owner->m_sent;
-        m_send_ctx.m_length = m_owner->m_encoded_request.size() - m_owner->m_sent;
+        fillSendIovecsFromPayload(m_send_iovecs,
+                                  m_owner->m_encoded_request,
+                                  m_owner->m_sent);
+        syncSendContextIovecs();
         if (!m_send_ctx.handleComplete(cqe, handle)) {
             return false;
         }
@@ -591,8 +678,10 @@ bool MongoConnectAwaitable::ProtocolFlowAwaitable::handleComplete(GHandle handle
                 m_owner->m_step = Step::Receiving;
                 break;
             }
-            m_send_ctx.m_buffer = m_owner->m_encoded_request.data() + m_owner->m_sent;
-            m_send_ctx.m_length = m_owner->m_encoded_request.size() - m_owner->m_sent;
+            fillSendIovecsFromPayload(m_send_iovecs,
+                                      m_owner->m_encoded_request,
+                                      m_owner->m_sent);
+            syncSendContextIovecs();
             if (!m_send_ctx.handleComplete(handle)) {
                 return false;
             }
@@ -700,12 +789,15 @@ void MongoConnectAwaitable::setRecvError(const IOError& io_error) noexcept
 
 std::expected<bool, MongoError> MongoConnectAwaitable::tryParseFromRingBuffer()
 {
-    auto read_iovecs = m_client.m_ring_buffer.getReadIovecs();
-    if (read_iovecs.empty()) {
+    struct iovec read_iovecs[2];
+    const size_t read_iovecs_count = m_client.m_ring_buffer.getReadIovecs(read_iovecs, 2);
+    if (read_iovecs_count == 0) {
         return false;
     }
 
-    auto decode_view_or_err = prepareDecodeView(read_iovecs, m_client.m_decode_scratch);
+    auto decode_view_or_err = prepareDecodeView(
+        std::span<const struct iovec>(read_iovecs, read_iovecs_count),
+        m_client.m_decode_scratch);
     if (!decode_view_or_err) {
         return std::unexpected(decode_view_or_err.error());
     }
@@ -986,9 +1078,23 @@ std::expected<bool, MongoError> MongoConnectAwaitable::await_resume()
 
 MongoCommandAwaitable::ProtocolFlowAwaitable::ProtocolFlowAwaitable(MongoCommandAwaitable* owner)
     : m_owner(owner)
-    , m_send_ctx(nullptr, 0)
-    , m_recv_ctx({})
+    , m_send_ctx(emptyIovecs(), 0)
+    , m_recv_ctx(emptyIovecs(), 0)
 {
+    m_send_iovecs.reserve(3);
+    m_recv_iovecs.reserve(2);
+    syncSendContextIovecs();
+    syncRecvContextIovecs();
+}
+
+void MongoCommandAwaitable::ProtocolFlowAwaitable::syncSendContextIovecs()
+{
+    m_send_ctx.m_iovecs = std::span<const struct iovec>(m_send_iovecs.data(), m_send_iovecs.size());
+}
+
+void MongoCommandAwaitable::ProtocolFlowAwaitable::syncRecvContextIovecs()
+{
+    m_recv_ctx.m_iovecs = std::span<const struct iovec>(m_recv_iovecs.data(), m_recv_iovecs.size());
 }
 
 IOEventType MongoCommandAwaitable::ProtocolFlowAwaitable::type() const
@@ -999,9 +1105,9 @@ IOEventType MongoCommandAwaitable::ProtocolFlowAwaitable::type() const
 
     switch (m_owner->m_step) {
     case Step::Sending:
-        return IOEventType::SEND;
+        return IOEventType::WRITEV;
     case Step::Receiving:
-        return IOEventType::RECV;
+        return IOEventType::READV;
     }
 
     return IOEventType::INVALID;
@@ -1022,7 +1128,7 @@ bool MongoCommandAwaitable::ProtocolFlowAwaitable::handleSendResult()
     }
 
     m_owner->m_sent += sent_once;
-    if (m_owner->m_sent >= m_owner->m_encoded_request.size()) {
+    if (m_owner->m_sent >= m_owner->outboundSize()) {
         m_owner->m_step = Step::Receiving;
     }
     return false;
@@ -1030,12 +1136,13 @@ bool MongoCommandAwaitable::ProtocolFlowAwaitable::handleSendResult()
 
 bool MongoCommandAwaitable::ProtocolFlowAwaitable::prepareReadIovecs()
 {
-    m_recv_ctx.m_iovecs = m_owner->m_client.m_ring_buffer.getWriteIovecs();
-    if (m_recv_ctx.m_iovecs.empty() || m_recv_ctx.m_iovecs.front().iov_len == 0) {
+    if (!fillReadIovecs(m_owner->m_client.m_ring_buffer, m_recv_iovecs)) {
         m_owner->setError(MongoError(MONGO_ERROR_RECV,
                                      "No writable ring buffer space while receiving command reply"));
+        syncRecvContextIovecs();
         return false;
     }
+    syncRecvContextIovecs();
     return true;
 }
 
@@ -1081,12 +1188,12 @@ bool MongoCommandAwaitable::ProtocolFlowAwaitable::handleComplete(struct io_urin
 
     switch (m_owner->m_step) {
     case Step::Sending:
-        if (m_owner->m_sent >= m_owner->m_encoded_request.size()) {
+        if (m_owner->m_sent >= m_owner->outboundSize()) {
             m_owner->m_step = Step::Receiving;
             return false;
         }
-        m_send_ctx.m_buffer = m_owner->m_encoded_request.data() + m_owner->m_sent;
-        m_send_ctx.m_length = m_owner->m_encoded_request.size() - m_owner->m_sent;
+        m_owner->fillSendIovecs(m_send_iovecs);
+        syncSendContextIovecs();
         if (!m_send_ctx.handleComplete(cqe, handle)) {
             return false;
         }
@@ -1113,12 +1220,12 @@ bool MongoCommandAwaitable::ProtocolFlowAwaitable::handleComplete(GHandle handle
     while (m_owner->m_lifecycle == Lifecycle::Running) {
         switch (m_owner->m_step) {
         case Step::Sending:
-            if (m_owner->m_sent >= m_owner->m_encoded_request.size()) {
+            if (m_owner->m_sent >= m_owner->outboundSize()) {
                 m_owner->m_step = Step::Receiving;
                 break;
             }
-            m_send_ctx.m_buffer = m_owner->m_encoded_request.data() + m_owner->m_sent;
-            m_send_ctx.m_length = m_owner->m_encoded_request.size() - m_owner->m_sent;
+            m_owner->fillSendIovecs(m_send_iovecs);
+            syncSendContextIovecs();
             if (!m_send_ctx.handleComplete(handle)) {
                 return false;
             }
@@ -1167,6 +1274,7 @@ void MongoCommandAwaitable::reset() noexcept
 {
     m_lifecycle = Lifecycle::Invalid;
     m_step = Step::Sending;
+    m_send_path = SendPath::EncodedRequest;
     m_encoded_request.clear();
     m_sent = 0;
     m_reply.reset();
@@ -1181,29 +1289,32 @@ void MongoCommandAwaitable::arm(std::string database, MongoDocument command)
     m_reply.reset();
     m_chain_error.reset();
 
-    if (!command.has("$db")) {
-        command.append("$db", database);
-    }
     if (isSimplePingCommand(command, database)) {
         if (m_ping_encoded_template.empty() || m_ping_template_db != database) {
             m_ping_template_db = database;
             m_ping_encoded_template.clear();
-            protocol::MongoProtocol::appendOpMsg(m_ping_encoded_template, 0, command);
+            protocol::MongoProtocol::appendOpMsgWithDatabase(m_ping_encoded_template,
+                                                             0,
+                                                             command,
+                                                             database);
         }
-        m_encoded_request = m_ping_encoded_template;
-        m_request_id = m_client.nextRequestId();
-        patchRequestId(m_encoded_request, m_request_id);
-    } else {
+        m_send_path = SendPath::PingTemplate;
         m_encoded_request.clear();
         m_request_id = m_client.nextRequestId();
-        protocol::MongoProtocol::appendOpMsg(m_encoded_request,
-                                             m_request_id,
-                                             command);
+        writeInt32LE(m_ping_request_id_le.data(), m_request_id);
+    } else {
+        m_send_path = SendPath::EncodedRequest;
+        m_encoded_request.clear();
+        m_request_id = m_client.nextRequestId();
+        protocol::MongoProtocol::appendOpMsgWithDatabase(m_encoded_request,
+                                                         m_request_id,
+                                                         command,
+                                                         database);
     }
 
     m_tasks.clear();
     m_cursor = 0;
-    addTask(IOEventType::SEND, &m_flow_awaitable);
+    addTask(IOEventType::WRITEV, &m_flow_awaitable);
 }
 
 void MongoCommandAwaitable::armPing(std::string database)
@@ -1213,23 +1324,54 @@ void MongoCommandAwaitable::armPing(std::string database)
     m_sent = 0;
     m_reply.reset();
     m_chain_error.reset();
+    m_send_path = SendPath::PingTemplate;
+    m_encoded_request.clear();
 
     if (m_ping_encoded_template.empty() || m_ping_template_db != database) {
         MongoDocument ping_doc;
         ping_doc.append("ping", int32_t(1));
-        ping_doc.append("$db", database);
         m_ping_template_db = database;
         m_ping_encoded_template.clear();
-        protocol::MongoProtocol::appendOpMsg(m_ping_encoded_template, 0, ping_doc);
+        protocol::MongoProtocol::appendOpMsgWithDatabase(m_ping_encoded_template,
+                                                         0,
+                                                         ping_doc,
+                                                         database);
     }
 
-    m_encoded_request = m_ping_encoded_template;
     m_request_id = m_client.nextRequestId();
-    patchRequestId(m_encoded_request, m_request_id);
+    writeInt32LE(m_ping_request_id_le.data(), m_request_id);
 
     m_tasks.clear();
     m_cursor = 0;
-    addTask(IOEventType::SEND, &m_flow_awaitable);
+    addTask(IOEventType::WRITEV, &m_flow_awaitable);
+}
+
+size_t MongoCommandAwaitable::outboundSize() const noexcept
+{
+    if (m_send_path == SendPath::PingTemplate) {
+        return m_ping_encoded_template.size();
+    }
+    return m_encoded_request.size();
+}
+
+void MongoCommandAwaitable::fillSendIovecs(std::vector<struct iovec>& iovecs) const
+{
+    if (m_send_path == SendPath::PingTemplate) {
+        if (m_ping_encoded_template.size() < 8) {
+            iovecs.clear();
+            return;
+        }
+
+        const std::array<SendSegment, 3> segments{{
+            SendSegment{m_ping_encoded_template.data(), 4},
+            SendSegment{m_ping_request_id_le.data(), m_ping_request_id_le.size()},
+            SendSegment{m_ping_encoded_template.data() + 8, m_ping_encoded_template.size() - 8},
+        }};
+        fillSendIovecsFromSegments(iovecs, std::span<const SendSegment>(segments), m_sent);
+        return;
+    }
+
+    fillSendIovecsFromPayload(iovecs, m_encoded_request, m_sent);
 }
 
 void MongoCommandAwaitable::setError(MongoError error) noexcept
@@ -1250,12 +1392,15 @@ void MongoCommandAwaitable::setRecvError(const IOError& io_error) noexcept
 
 std::expected<bool, MongoError> MongoCommandAwaitable::tryParseFromRingBuffer()
 {
-    auto read_iovecs = m_client.m_ring_buffer.getReadIovecs();
-    if (read_iovecs.empty()) {
+    struct iovec read_iovecs[2];
+    const size_t read_iovecs_count = m_client.m_ring_buffer.getReadIovecs(read_iovecs, 2);
+    if (read_iovecs_count == 0) {
         return false;
     }
 
-    auto decode_view_or_err = prepareDecodeView(read_iovecs, m_client.m_decode_scratch);
+    auto decode_view_or_err = prepareDecodeView(
+        std::span<const struct iovec>(read_iovecs, read_iovecs_count),
+        m_client.m_decode_scratch);
     if (!decode_view_or_err) {
         return std::unexpected(decode_view_or_err.error());
     }
@@ -1314,9 +1459,23 @@ std::expected<MongoReply, MongoError> MongoCommandAwaitable::await_resume()
 
 MongoPipelineAwaitable::ProtocolFlowAwaitable::ProtocolFlowAwaitable(MongoPipelineAwaitable* owner)
     : m_owner(owner)
-    , m_send_ctx(nullptr, 0)
-    , m_recv_ctx({})
+    , m_send_ctx(emptyIovecs(), 0)
+    , m_recv_ctx(emptyIovecs(), 0)
 {
+    m_send_iovecs.reserve(1);
+    m_recv_iovecs.reserve(2);
+    syncSendContextIovecs();
+    syncRecvContextIovecs();
+}
+
+void MongoPipelineAwaitable::ProtocolFlowAwaitable::syncSendContextIovecs()
+{
+    m_send_ctx.m_iovecs = std::span<const struct iovec>(m_send_iovecs.data(), m_send_iovecs.size());
+}
+
+void MongoPipelineAwaitable::ProtocolFlowAwaitable::syncRecvContextIovecs()
+{
+    m_recv_ctx.m_iovecs = std::span<const struct iovec>(m_recv_iovecs.data(), m_recv_iovecs.size());
 }
 
 IOEventType MongoPipelineAwaitable::ProtocolFlowAwaitable::type() const
@@ -1327,9 +1486,9 @@ IOEventType MongoPipelineAwaitable::ProtocolFlowAwaitable::type() const
 
     switch (m_owner->m_step) {
     case Step::Sending:
-        return IOEventType::SEND;
+        return IOEventType::WRITEV;
     case Step::Receiving:
-        return IOEventType::RECV;
+        return IOEventType::READV;
     }
 
     return IOEventType::INVALID;
@@ -1358,12 +1517,13 @@ bool MongoPipelineAwaitable::ProtocolFlowAwaitable::handleSendResult()
 
 bool MongoPipelineAwaitable::ProtocolFlowAwaitable::prepareReadIovecs()
 {
-    m_recv_ctx.m_iovecs = m_owner->m_client.m_ring_buffer.getWriteIovecs();
-    if (m_recv_ctx.m_iovecs.empty() || m_recv_ctx.m_iovecs.front().iov_len == 0) {
+    if (!fillReadIovecs(m_owner->m_client.m_ring_buffer, m_recv_iovecs)) {
         m_owner->setError(MongoError(MONGO_ERROR_RECV,
                                      "No writable ring buffer space while receiving pipeline replies"));
+        syncRecvContextIovecs();
         return false;
     }
+    syncRecvContextIovecs();
     return true;
 }
 
@@ -1413,8 +1573,10 @@ bool MongoPipelineAwaitable::ProtocolFlowAwaitable::handleComplete(struct io_uri
             m_owner->m_step = Step::Receiving;
             return false;
         }
-        m_send_ctx.m_buffer = m_owner->m_encoded_batch.data() + m_owner->m_sent;
-        m_send_ctx.m_length = m_owner->m_encoded_batch.size() - m_owner->m_sent;
+        fillSendIovecsFromPayload(m_send_iovecs,
+                                  m_owner->m_encoded_batch,
+                                  m_owner->m_sent);
+        syncSendContextIovecs();
         if (!m_send_ctx.handleComplete(cqe, handle)) {
             return false;
         }
@@ -1445,8 +1607,10 @@ bool MongoPipelineAwaitable::ProtocolFlowAwaitable::handleComplete(GHandle handl
                 m_owner->m_step = Step::Receiving;
                 break;
             }
-            m_send_ctx.m_buffer = m_owner->m_encoded_batch.data() + m_owner->m_sent;
-            m_send_ctx.m_length = m_owner->m_encoded_batch.size() - m_owner->m_sent;
+            fillSendIovecsFromPayload(m_send_iovecs,
+                                      m_owner->m_encoded_batch,
+                                      m_owner->m_sent);
+            syncSendContextIovecs();
             if (!m_send_ctx.handleComplete(handle)) {
                 return false;
             }
@@ -1478,12 +1642,12 @@ bool MongoPipelineAwaitable::ProtocolFlowAwaitable::handleComplete(GHandle handl
 
 MongoPipelineAwaitable::MongoPipelineAwaitable(AsyncMongoClient& client,
                                                std::string database,
-                                               std::vector<MongoDocument> commands)
+                                               std::span<const MongoDocument> commands)
     : CustomAwaitable(client.m_socket.controller())
     , m_client(client)
     , m_flow_awaitable(this)
 {
-    arm(std::move(database), std::move(commands));
+    arm(std::move(database), commands);
 }
 
 void MongoPipelineAwaitable::reset() noexcept
@@ -1500,7 +1664,7 @@ void MongoPipelineAwaitable::reset() noexcept
     m_chain_error.reset();
 }
 
-void MongoPipelineAwaitable::arm(std::string database, std::vector<MongoDocument> commands)
+void MongoPipelineAwaitable::arm(std::string database, std::span<const MongoDocument> commands)
 {
     m_lifecycle = Lifecycle::Running;
     m_step = Step::Sending;
@@ -1523,24 +1687,23 @@ void MongoPipelineAwaitable::arm(std::string database, std::vector<MongoDocument
 
     m_responses.resize(commands.size());
     m_encoded_batch.clear();
-    m_encoded_batch.reserve(m_client.m_pipeline_reserve_per_command * commands.size());
 
     const int32_t first_request_id = m_client.reserveRequestIdBlock(commands.size());
     m_first_request_id = first_request_id;
 
     for (size_t i = 0; i < commands.size(); ++i) {
-        auto& command = commands[i];
-        if (!command.has("$db")) {
-            command.append("$db", database);
-        }
-
         const int32_t request_id =
             static_cast<int32_t>(static_cast<int64_t>(first_request_id) + static_cast<int64_t>(i));
         m_responses[i].request_id = request_id;
-        protocol::MongoProtocol::appendOpMsg(m_encoded_batch, request_id, command);
     }
 
-    addTask(IOEventType::SEND, &m_flow_awaitable);
+    m_encoded_batch = protocol::MongoCommandBuilder::encodePipeline(
+        database,
+        first_request_id,
+        commands,
+        m_client.m_pipeline_reserve_per_command);
+
+    addTask(IOEventType::WRITEV, &m_flow_awaitable);
 }
 
 void MongoPipelineAwaitable::setError(MongoError error) noexcept
@@ -1562,12 +1725,15 @@ void MongoPipelineAwaitable::setRecvError(const IOError& io_error) noexcept
 std::expected<bool, MongoError> MongoPipelineAwaitable::tryParseFromRingBuffer()
 {
     while (m_received < m_responses.size()) {
-        auto read_iovecs = m_client.m_ring_buffer.getReadIovecs();
-        if (read_iovecs.empty()) {
+        struct iovec read_iovecs[2];
+        const size_t read_iovecs_count = m_client.m_ring_buffer.getReadIovecs(read_iovecs, 2);
+        if (read_iovecs_count == 0) {
             return false;
         }
 
-        auto decode_view_or_err = prepareDecodeView(read_iovecs, m_client.m_decode_scratch);
+        auto decode_view_or_err = prepareDecodeView(
+            std::span<const struct iovec>(read_iovecs, read_iovecs_count),
+            m_client.m_decode_scratch);
         if (!decode_view_or_err) {
             return std::unexpected(decode_view_or_err.error());
         }
@@ -1679,8 +1845,11 @@ int32_t AsyncMongoClient::nextRequestId()
     return reserveRequestIdBlock(1);
 }
 
-AsyncMongoClient::AsyncMongoClient(IOScheduler* scheduler, AsyncMongoConfig config)
-    : m_ring_buffer(config.buffer_size > 0 ? config.buffer_size : RingBuffer::kDefaultCapacity)
+AsyncMongoClient::AsyncMongoClient(IOScheduler* scheduler,
+                                   AsyncMongoConfig config,
+                                   std::shared_ptr<MongoBufferProvider> buffer_provider)
+    : m_ring_buffer(config.buffer_size > 0 ? config.buffer_size : galay::kernel::RingBuffer::kDefaultCapacity,
+                    std::move(buffer_provider))
     , m_pipeline_reserve_per_command(std::max<size_t>(32, config.pipeline_reserve_per_command))
 {
     (void)scheduler;
@@ -1757,9 +1926,9 @@ MongoCommandAwaitable AsyncMongoClient::ping(std::string database)
 }
 
 MongoPipelineAwaitable AsyncMongoClient::pipeline(std::string database,
-                                                  std::vector<MongoDocument> commands)
+                                                  std::span<const MongoDocument> commands)
 {
-    return MongoPipelineAwaitable(*this, std::move(database), std::move(commands));
+    return MongoPipelineAwaitable(*this, std::move(database), commands);
 }
 
 } // namespace galay::mongo

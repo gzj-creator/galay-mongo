@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <arpa/inet.h>
+#include <array>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -248,15 +249,16 @@ std::expected<void, MongoError> Connection::ensureData(size_t n)
                                               "Receive ring buffer is full before enough data"));
         }
 
-        auto write_iovecs = m_recv_ring.getWriteIovecs();
-        if (write_iovecs.empty()) {
+        std::array<struct iovec, 2> write_iovecs{};
+        const size_t write_iovecs_count = m_recv_ring.getWriteIovecs(write_iovecs);
+        if (write_iovecs_count == 0) {
             return std::unexpected(MongoError(MONGO_ERROR_PROTOCOL,
                                               "Receive ring buffer has no writable regions"));
         }
 
         const ssize_t received = ::readv(m_socket_fd,
                                          write_iovecs.data(),
-                                         static_cast<int>(write_iovecs.size()));
+                                         static_cast<int>(write_iovecs_count));
         if (received < 0) {
             if (errno == EINTR) {
                 continue;
@@ -313,11 +315,13 @@ std::expected<void, MongoError> Connection::recvExact(char* buffer, size_t n)
 
 void Connection::copyReadable(size_t offset, char* dst, size_t len) const
 {
-    auto read_iovecs = m_recv_ring.getReadIovecs();
+    std::array<struct iovec, 2> read_iovecs{};
+    const size_t read_iovecs_count = m_recv_ring.getReadIovecs(read_iovecs);
     size_t skipped = offset;
     size_t copied = 0;
 
-    for (const auto& iov : read_iovecs) {
+    for (size_t i = 0; i < read_iovecs_count; ++i) {
+        const auto& iov = read_iovecs[i];
         if (copied >= len) {
             break;
         }
@@ -443,16 +447,17 @@ std::expected<MongoMessage, MongoError> Connection::recvMessage()
             return std::unexpected(ensured.error());
         }
 
-        auto read_iovecs = m_recv_ring.getReadIovecs();
-        if (read_iovecs.empty()) {
+        std::array<struct iovec, 2> read_iovecs{};
+        const size_t read_iovecs_count = m_recv_ring.getReadIovecs(read_iovecs);
+        if (read_iovecs_count == 0) {
             return std::unexpected(MongoError(MONGO_ERROR_PROTOCOL,
                                               "Receive ring buffer has no readable regions"));
         }
 
         std::expected<MongoMessage, MongoError> decoded;
-        if (read_iovecs.front().iov_len >= message_size) {
+        if (read_iovecs[0].iov_len >= message_size) {
             decoded = MongoProtocol::decodeMessage(
-                static_cast<const char*>(read_iovecs.front().iov_base),
+                static_cast<const char*>(read_iovecs[0].iov_base),
                 message_size);
         } else {
             m_decode_buffer.resize(message_size);

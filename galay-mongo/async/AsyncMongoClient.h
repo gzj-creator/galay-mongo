@@ -2,7 +2,6 @@
 #define GALAY_MONGO_ASYNC_CLIENT_H
 
 #include <galay-kernel/async/TcpSocket.h>
-#include <galay-kernel/common/Buffer.h>
 #include <galay-kernel/common/Error.h>
 #include <galay-kernel/common/Host.hpp>
 #include <galay-kernel/kernel/Coroutine.h>
@@ -10,8 +9,10 @@
 
 #include <coroutine>
 #include <expected>
+#include <array>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -22,6 +23,7 @@
 #include "galay-mongo/base/MongoLog.h"
 #include "galay-mongo/base/MongoValue.h"
 #include "galay-mongo/protocol/MongoProtocol.h"
+#include "MongoBufferProvider.h"
 
 namespace galay::mongo
 {
@@ -35,8 +37,7 @@ using galay::kernel::IOError;
 using galay::kernel::IOScheduler;
 using galay::kernel::IPType;
 using galay::kernel::ReadvIOContext;
-using galay::kernel::RingBuffer;
-using galay::kernel::SendIOContext;
+using galay::kernel::WritevIOContext;
 
 class AsyncMongoClient;
 
@@ -73,6 +74,12 @@ public:
         return *this;
     }
 
+    AsyncMongoClientBuilder& bufferProvider(std::shared_ptr<MongoBufferProvider> provider)
+    {
+        m_buffer_provider = std::move(provider);
+        return *this;
+    }
+
     AsyncMongoClientBuilder& pipelineReservePerCommand(size_t reserve)
     {
         m_config.pipeline_reserve_per_command = reserve;
@@ -95,6 +102,7 @@ public:
 private:
     IOScheduler* m_scheduler = nullptr;
     AsyncMongoConfig m_config = AsyncMongoConfig::noTimeout();
+    std::shared_ptr<MongoBufferProvider> m_buffer_provider;
 };
 
 /// 异步连接 awaitable，处理 TCP 连接 + hello 握手 + SCRAM-SHA-256 认证的完整流程
@@ -121,11 +129,15 @@ public:
         bool prepareReadIovecs();
         bool parseAndAdvance();
         bool handleReadResult();
+        void syncSendContextIovecs();
+        void syncRecvContextIovecs();
 
         MongoConnectAwaitable* m_owner;
         ConnectIOContext m_connect_ctx;
-        SendIOContext m_send_ctx;
+        WritevIOContext m_send_ctx;
         ReadvIOContext m_recv_ctx;
+        std::vector<struct iovec> m_send_iovecs;
+        std::vector<struct iovec> m_recv_iovecs;
     };
 
     MongoConnectAwaitable(AsyncMongoClient& client, MongoConfig config);
@@ -207,10 +219,14 @@ public:
         bool prepareReadIovecs();
         bool parseAndAdvance();
         bool handleReadResult();
+        void syncSendContextIovecs();
+        void syncRecvContextIovecs();
 
         MongoCommandAwaitable* m_owner;
-        SendIOContext m_send_ctx;
+        WritevIOContext m_send_ctx;
         ReadvIOContext m_recv_ctx;
+        std::vector<struct iovec> m_send_iovecs;
+        std::vector<struct iovec> m_recv_iovecs;
     };
 
     MongoCommandAwaitable(AsyncMongoClient& client,
@@ -236,10 +252,16 @@ private:
         Sending,
         Receiving,
     };
+    enum class SendPath {
+        EncodedRequest,
+        PingTemplate,
+    };
 
     void reset() noexcept;
     void arm(std::string database, MongoDocument command);
     void armPing(std::string database);
+    size_t outboundSize() const noexcept;
+    void fillSendIovecs(std::vector<struct iovec>& iovecs) const;
     void setError(MongoError error) noexcept;
     void setSendError(const IOError& io_error) noexcept;
     void setRecvError(const IOError& io_error) noexcept;
@@ -251,6 +273,8 @@ private:
     int32_t m_request_id = 0;
     Lifecycle m_lifecycle = Lifecycle::Invalid;
     Step m_step = Step::Sending;
+    SendPath m_send_path = SendPath::EncodedRequest;
+    std::array<char, 4> m_ping_request_id_le{};
     std::optional<MongoReply> m_reply;
     std::string m_ping_template_db;
     std::string m_ping_encoded_template;
@@ -293,15 +317,19 @@ public:
         bool prepareReadIovecs();
         bool parseAndAdvance();
         bool handleReadResult();
+        void syncSendContextIovecs();
+        void syncRecvContextIovecs();
 
         MongoPipelineAwaitable* m_owner;
-        SendIOContext m_send_ctx;
+        WritevIOContext m_send_ctx;
         ReadvIOContext m_recv_ctx;
+        std::vector<struct iovec> m_send_iovecs;
+        std::vector<struct iovec> m_recv_iovecs;
     };
 
     MongoPipelineAwaitable(AsyncMongoClient& client,
                            std::string database,
-                           std::vector<MongoDocument> commands);
+                           std::span<const MongoDocument> commands);
 
     bool await_ready() const noexcept { return false; }
     using CustomAwaitable::await_suspend;
@@ -323,7 +351,7 @@ private:
     };
 
     void reset() noexcept;
-    void arm(std::string database, std::vector<MongoDocument> commands);
+    void arm(std::string database, std::span<const MongoDocument> commands);
     void setError(MongoError error) noexcept;
     void setSendError(const IOError& io_error) noexcept;
     void setRecvError(const IOError& io_error) noexcept;
@@ -346,7 +374,8 @@ class AsyncMongoClient
 {
 public:
     AsyncMongoClient(IOScheduler* scheduler,
-                AsyncMongoConfig config = AsyncMongoConfig::noTimeout());
+                     AsyncMongoConfig config = AsyncMongoConfig::noTimeout(),
+                     std::shared_ptr<MongoBufferProvider> buffer_provider = nullptr);
 
     AsyncMongoClient(AsyncMongoClient&& other) noexcept;
     AsyncMongoClient& operator=(AsyncMongoClient&& other) noexcept;
@@ -364,7 +393,7 @@ public:
     MongoCommandAwaitable command(std::string database, MongoDocument command);
     MongoCommandAwaitable ping(std::string database = "admin");
     MongoPipelineAwaitable pipeline(std::string database,
-                                    std::vector<MongoDocument> commands);
+                                    std::span<const MongoDocument> commands);
 
     auto close()
     {
@@ -374,7 +403,9 @@ public:
     bool isClosed() const { return m_is_closed; }
 
     TcpSocket& socket() { return m_socket; }
-    RingBuffer& ringBuffer() { return m_ring_buffer; }
+    MongoBufferHandle& ringBuffer() { return m_ring_buffer; }
+    MongoBufferProvider& bufferProvider() { return m_ring_buffer.provider(); }
+    const MongoBufferProvider& bufferProvider() const { return m_ring_buffer.provider(); }
     int32_t nextRequestId();
     MongoLogger& logger() { return m_logger; }
     const MongoLogger& logger() const { return m_logger; }
@@ -392,7 +423,7 @@ private:
 
     bool m_is_closed = true;
     TcpSocket m_socket;
-    RingBuffer m_ring_buffer;
+    MongoBufferHandle m_ring_buffer;
     std::string m_decode_scratch;
     size_t m_pipeline_reserve_per_command = 96;
     int32_t m_next_request_id = 1;
@@ -402,7 +433,7 @@ private:
 
 inline galay::mongo::AsyncMongoClient galay::mongo::AsyncMongoClientBuilder::build() const
 {
-    return AsyncMongoClient(m_scheduler, m_config);
+    return AsyncMongoClient(m_scheduler, m_config, m_buffer_provider);
 }
 
 } // namespace galay::mongo

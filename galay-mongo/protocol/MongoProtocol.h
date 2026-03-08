@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <expected>
 #include <string>
+#include <string_view>
 
 namespace galay::mongo::protocol
 {
@@ -51,6 +52,13 @@ public:
                             int32_t request_id,
                             const MongoDocument& body,
                             int32_t flags = 0);
+
+    /// 将命令文档追加编码为 OP_MSG；若命令缺少 `$db` 字段则按需补齐
+    static void appendOpMsgWithDatabase(std::string& out,
+                                        int32_t request_id,
+                                        const MongoDocument& body,
+                                        std::string_view database,
+                                        int32_t flags = 0);
 
     /// 从完整消息二进制数据解码为 MongoMessage
     static std::expected<MongoMessage, MongoError> decodeMessage(const char* data, size_t len);
