@@ -19,7 +19,7 @@ MongoDocument buildClientMetadata(const std::string& app_name)
 {
     MongoDocument driver;
     driver.append("name", "galay-mongo");
-    driver.append("version", "0.1.0");
+    driver.append("version", "1.1.1");
 
     MongoDocument os;
 #if defined(__APPLE__)

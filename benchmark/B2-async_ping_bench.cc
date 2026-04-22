@@ -144,10 +144,10 @@ struct AsyncBenchState
     }
 };
 
-Coroutine runWorker(IOScheduler* scheduler,
-                    AsyncBenchState* state,
-                    mongo_bench::BenchConfig cfg,
-                    size_t worker_count)
+Task<void> runWorker(IOScheduler* scheduler,
+                     AsyncBenchState* state,
+                     mongo_bench::BenchConfig cfg,
+                     size_t worker_count)
 {
     auto client = AsyncMongoClientBuilder()
         .scheduler(scheduler)
@@ -364,7 +364,11 @@ int main(int argc, char** argv)
             std::cerr << "failed to get IO scheduler" << std::endl;
             return 1;
         }
-        scheduler->spawn(runWorker(scheduler, &state, cfg, worker_count));
+        if (!scheduleTask(scheduler, runWorker(scheduler, &state, cfg, worker_count))) {
+            runtime.stop();
+            std::cerr << "failed to schedule benchmark worker" << std::endl;
+            return 1;
+        }
     }
 
     const auto deadline =

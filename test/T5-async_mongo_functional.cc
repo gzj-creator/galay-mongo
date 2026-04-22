@@ -126,9 +126,9 @@ void setFailure(AsyncFunctionalState* state, std::string message)
     state->done.store(true, std::memory_order_release);
 }
 
-Coroutine runAsyncFunctional(IOScheduler* scheduler,
-                             AsyncFunctionalState* state,
-                             AsyncClientConfig cfg)
+Task<void> runAsyncFunctional(IOScheduler* scheduler,
+                              AsyncFunctionalState* state,
+                              AsyncClientConfig cfg)
 {
     auto client = AsyncMongoClientBuilder().scheduler(scheduler).config(cfg.async).build();
 
@@ -339,11 +339,16 @@ int main()
     }
 
     AsyncFunctionalState state;
-    scheduler->spawn(runAsyncFunctional(scheduler,
-                                        &state,
-                                        AsyncClientConfig{
-                                            mongo_test::toMongoConfig(test_cfg),
-                                            mongo_test::loadAsyncMongoTestConfig()}));
+    if (!scheduleTask(scheduler,
+                      runAsyncFunctional(scheduler,
+                                         &state,
+                                         AsyncClientConfig{
+                                             mongo_test::toMongoConfig(test_cfg),
+                                             mongo_test::loadAsyncMongoTestConfig()}))) {
+        std::cerr << "Failed to schedule async functional task" << std::endl;
+        runtime.stop();
+        return 1;
+    }
 
     using namespace std::chrono_literals;
     const auto deadline = std::chrono::steady_clock::now() + 20s;

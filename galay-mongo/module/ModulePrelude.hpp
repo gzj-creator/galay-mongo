@@ -42,8 +42,8 @@
 #if __has_include(<galay-kernel/common/Host.hpp>)
 #include <galay-kernel/common/Host.hpp>
 #endif
-#if __has_include(<galay-kernel/kernel/Coroutine.h>)
-#include <galay-kernel/kernel/Coroutine.h>
+#if __has_include(<galay-kernel/kernel/Task.h>)
+#include <galay-kernel/kernel/Task.h>
 #endif
 #if __has_include(<galay-kernel/kernel/IOScheduler.hpp>)
 #include <galay-kernel/kernel/IOScheduler.hpp>

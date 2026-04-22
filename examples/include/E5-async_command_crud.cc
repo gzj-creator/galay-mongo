@@ -121,9 +121,9 @@ void setFailure(RunState* state, std::string message)
     state->done.store(true, std::memory_order_release);
 }
 
-Coroutine run(IOScheduler* scheduler,
-              RunState* state,
-              AsyncClientConfig cfg)
+Task<void> run(IOScheduler* scheduler,
+               RunState* state,
+               AsyncClientConfig cfg)
 {
     auto client = AsyncMongoClientBuilder().scheduler(scheduler).config(cfg.async).build();
 
@@ -186,7 +186,11 @@ int main()
     }
 
     RunState state;
-    scheduler->spawn(run(scheduler, &state, AsyncClientConfig{mongo_cfg, async_cfg}));
+    if (!scheduleTask(scheduler, run(scheduler, &state, AsyncClientConfig{mongo_cfg, async_cfg}))) {
+        std::cerr << "Failed to schedule async command CRUD task" << std::endl;
+        runtime.stop();
+        return 1;
+    }
 
     using namespace std::chrono_literals;
     const auto deadline = std::chrono::steady_clock::now() + 10s;

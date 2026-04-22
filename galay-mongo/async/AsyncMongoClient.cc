@@ -1,4 +1,5 @@
 #include "AsyncMongoClient.h"
+
 #include "galay-mongo/base/SocketOptions.h"
 #include "galay-mongo/protocol/Builder.h"
 
@@ -8,12 +9,16 @@
 #include <openssl/sha.h>
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <span>
+#include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace galay::mongo
 {
@@ -190,8 +195,7 @@ hmacSha256(const std::vector<uint8_t>& key, const std::string& data)
     return output;
 }
 
-std::expected<std::vector<uint8_t>, MongoError>
-sha256(const std::vector<uint8_t>& data)
+std::expected<std::vector<uint8_t>, MongoError> sha256(const std::vector<uint8_t>& data)
 {
     std::vector<uint8_t> output(SHA256_DIGEST_LENGTH, 0);
     if (::SHA256(data.data(), data.size(), output.data()) == nullptr) {
@@ -263,7 +267,7 @@ MongoDocument buildClientMetadata(const std::string& app_name)
 {
     MongoDocument driver;
     driver.append("name", "galay-mongo");
-    driver.append("version", "0.1.0");
+    driver.append("version", "1.1.1");
 
     MongoDocument os;
 #if defined(__APPLE__)
@@ -303,6 +307,12 @@ struct DecodeView
 {
     const char* data = nullptr;
     int32_t msg_len = 0;
+};
+
+struct SendSegment
+{
+    const char* data = nullptr;
+    size_t len = 0;
 };
 
 constexpr size_t kAsyncMaxMessageSize = 128 * 1024 * 1024;
@@ -348,7 +358,6 @@ prepareDecodeView(std::span<const struct iovec> read_iovecs, std::string& parse_
         return std::unexpected(MongoError(MONGO_ERROR_PROTOCOL,
                                           "Mongo message exceeds max supported size"));
     }
-
     if (total_len < static_cast<size_t>(msg_len)) {
         return std::optional<DecodeView>{};
     }
@@ -378,18 +387,6 @@ prepareDecodeView(std::span<const struct iovec> read_iovecs, std::string& parse_
     return std::optional<DecodeView>(DecodeView{parse_buffer.data(), msg_len});
 }
 
-struct SendSegment
-{
-    const char* data = nullptr;
-    size_t len = 0;
-};
-
-std::array<struct iovec, 1>& emptyIovecs()
-{
-    static std::array<struct iovec, 1> empty{};
-    return empty;
-}
-
 void fillSendIovecsFromSegments(std::vector<struct iovec>& iovecs,
                                 std::span<const SendSegment> segments,
                                 size_t sent)
@@ -412,37 +409,6 @@ void fillSendIovecsFromSegments(std::vector<struct iovec>& iovecs,
         });
         skip = 0;
     }
-}
-
-void fillSendIovecsFromPayload(std::vector<struct iovec>& iovecs,
-                               const std::string& payload,
-                               size_t sent)
-{
-    iovecs.clear();
-    if (sent >= payload.size()) {
-        return;
-    }
-
-    iovecs.push_back(iovec{
-        const_cast<char*>(payload.data() + sent),
-        payload.size() - sent
-    });
-}
-
-bool fillReadIovecs(MongoBufferHandle& buffer_handle,
-                    std::vector<struct iovec>& iovecs)
-{
-    struct iovec raw_iovecs[2];
-    const size_t count = buffer_handle.getWriteIovecs(raw_iovecs, 2);
-    iovecs.clear();
-    iovecs.reserve(count);
-    for (size_t i = 0; i < count; ++i) {
-        if (raw_iovecs[i].iov_len == 0) {
-            continue;
-        }
-        iovecs.push_back(raw_iovecs[i]);
-    }
-    return !iovecs.empty();
 }
 
 bool isSimplePingCommand(const MongoDocument& command, const std::string& database)
@@ -480,1265 +446,347 @@ bool isSimplePingCommand(const MongoDocument& command, const std::string& databa
     return false;
 }
 
+MongoError makeServerError(MongoReply&& reply, std::string_view default_message)
+{
+    return MongoError(MONGO_ERROR_SERVER,
+                      reply.errorCode(),
+                      reply.errorMessage().empty()
+                          ? std::string(default_message)
+                          : reply.errorMessage());
+}
+
 } // namespace
 
-MongoConnectAwaitable::ProtocolFlowAwaitable::ProtocolFlowAwaitable(MongoConnectAwaitable* owner)
-    : m_owner(owner)
-    , m_connect_ctx(Host(IPType::IPV4, owner->m_config.host, owner->m_config.port))
-    , m_send_ctx(emptyIovecs(), 0)
-    , m_recv_ctx(emptyIovecs(), 0)
+struct AsyncMongoClientInternals
 {
-    m_send_iovecs.reserve(1);
-    m_recv_iovecs.reserve(2);
-    syncSendContextIovecs();
-    syncRecvContextIovecs();
-}
+    enum class AuthPhase {
+        HelloReply,
+        SaslStartReply,
+        SaslContinueReply,
+        SaslFinalReply,
+    };
 
-void MongoConnectAwaitable::ProtocolFlowAwaitable::syncSendContextIovecs()
-{
-    m_send_ctx.m_iovecs = std::span<const struct iovec>(m_send_iovecs.data(), m_send_iovecs.size());
-}
+    struct ConnectFlowState {
+        AsyncMongoClient& client;
+        MongoConfig config;
+        bool auth_enabled = false;
+        AuthPhase auth_phase = AuthPhase::HelloReply;
+        std::string auth_db;
+        int32_t auth_conversation_id = 0;
+        std::string auth_client_nonce;
+        std::string auth_client_first_bare;
+        std::string auth_expected_server_signature;
+        std::string encoded_request;
 
-void MongoConnectAwaitable::ProtocolFlowAwaitable::syncRecvContextIovecs()
-{
-    m_recv_ctx.m_iovecs = std::span<const struct iovec>(m_recv_iovecs.data(), m_recv_iovecs.size());
-}
+        ConnectFlowState(AsyncMongoClient& client_ref, MongoConfig cfg)
+            : client(client_ref)
+            , config(std::move(cfg))
+        {
+        }
 
-IOEventType MongoConnectAwaitable::ProtocolFlowAwaitable::type() const
-{
-    if (m_owner->m_lifecycle != Lifecycle::Running) {
-        return IOEventType::INVALID;
-    }
+        std::expected<void, MongoError> initialize()
+        {
+            auth_enabled = !config.username.empty() || !config.password.empty();
+            auth_db = !config.auth_database.empty()
+                ? config.auth_database
+                : (!config.database.empty() ? config.database : "admin");
 
-    switch (m_owner->m_step) {
-    case Step::Connecting:
-        return IOEventType::CONNECT;
-    case Step::Sending:
-        return IOEventType::WRITEV;
-    case Step::Receiving:
-        return IOEventType::READV;
-    }
+            if ((config.username.empty() && !config.password.empty()) ||
+                (!config.username.empty() && config.password.empty())) {
+                return std::unexpected(MongoError(
+                    MONGO_ERROR_INVALID_PARAM,
+                    "Both username and password are required for SCRAM authentication"));
+            }
 
-    return IOEventType::INVALID;
-}
+            MongoDocument hello;
+            hello.append("hello", int32_t(1));
+            hello.append("helloOk", true);
+            hello.append("$db", config.hello_database.empty() ? std::string("admin")
+                                                              : config.hello_database);
+            hello.append("client", buildClientMetadata(config.app_name));
 
-bool MongoConnectAwaitable::ProtocolFlowAwaitable::handleConnectResult()
-{
-    if (!m_connect_ctx.m_result.has_value()) {
-        m_owner->setConnectError(m_connect_ctx.m_result.error());
-        return true;
-    }
+            encoded_request.clear();
+            protocol::MongoProtocol::appendOpMsg(
+                encoded_request,
+                client.nextRequestId(),
+                hello);
+            return {};
+        }
 
-    const int fd = m_owner->m_client.m_socket.handle().fd;
-    trySetTcpNoDelay(fd, m_owner->m_config.tcp_nodelay);
+        std::expected<bool, MongoError> handleReply(MongoReply&& reply)
+        {
+            switch (auth_phase) {
+            case AuthPhase::HelloReply:
+                return handleHelloReply(std::move(reply));
+            case AuthPhase::SaslStartReply:
+                return handleSaslStartReply(std::move(reply));
+            case AuthPhase::SaslContinueReply:
+                return handleSaslContinueReply(std::move(reply));
+            case AuthPhase::SaslFinalReply:
+                return handleSaslFinalReply(std::move(reply));
+            }
 
-    m_owner->m_client.m_socket.option().handleNonBlock();
-    m_owner->m_step = Step::Sending;
-    return false;
-}
+            return std::unexpected(MongoError(MONGO_ERROR_INTERNAL,
+                                              "Unknown auth phase in connect flow"));
+        }
 
-bool MongoConnectAwaitable::ProtocolFlowAwaitable::handleSendResult()
-{
-    if (!m_send_ctx.m_result.has_value()) {
-        m_owner->setSendError(m_send_ctx.m_result.error());
-        return true;
-    }
+    private:
+        std::expected<bool, MongoError> handleHelloReply(MongoReply&&)
+        {
+            if (!auth_enabled) {
+                return true;
+            }
 
-    const size_t sent_once = m_send_ctx.m_result.value();
-    if (sent_once == 0) {
-        m_owner->setError(MongoError(MONGO_ERROR_CONNECTION_CLOSED,
-                                     "Connection closed during connect/auth request send"));
-        return true;
-    }
+            auto nonce_or_err = generateClientNonce();
+            if (!nonce_or_err) {
+                return std::unexpected(nonce_or_err.error());
+            }
 
-    m_owner->m_sent += sent_once;
-    if (m_owner->m_sent >= m_owner->m_encoded_request.size()) {
-        m_owner->m_step = Step::Receiving;
-    }
-    return false;
-}
+            auth_client_nonce = std::move(nonce_or_err.value());
+            auth_client_first_bare =
+                "n=" + escapeScramUsername(config.username) + ",r=" + auth_client_nonce;
+            const std::string client_first_message = "n,," + auth_client_first_bare;
 
-bool MongoConnectAwaitable::ProtocolFlowAwaitable::prepareReadIovecs()
-{
-    if (!fillReadIovecs(m_owner->m_client.m_ring_buffer, m_recv_iovecs)) {
-        m_owner->setError(MongoError(MONGO_ERROR_RECV,
-                                     "No writable ring buffer space while receiving connect/auth reply"));
-        syncRecvContextIovecs();
-        return false;
-    }
-    syncRecvContextIovecs();
-    return true;
-}
+            MongoValue::Binary payload(client_first_message.begin(), client_first_message.end());
 
-bool MongoConnectAwaitable::ProtocolFlowAwaitable::parseAndAdvance()
-{
-    auto parse_result = m_owner->tryParseFromRingBuffer();
-    if (!parse_result.has_value()) {
-        m_owner->setError(std::move(parse_result.error()));
-        return true;
-    }
+            MongoDocument sasl_start;
+            sasl_start.append("saslStart", int32_t(1));
+            sasl_start.append("mechanism", "SCRAM-SHA-256");
+            sasl_start.append("payload", std::move(payload));
+            sasl_start.append("autoAuthorize", int32_t(1));
+            sasl_start.append("$db", auth_db);
 
-    if (!parse_result.value()) {
-        return false;
-    }
-
-    if (m_owner->m_lifecycle == Lifecycle::Running) {
-        m_owner->m_step = Step::Sending;
-        return false;
-    }
-
-    return true;
-}
-
-bool MongoConnectAwaitable::ProtocolFlowAwaitable::handleReadResult()
-{
-    if (!m_recv_ctx.m_result.has_value()) {
-        m_owner->setRecvError(m_recv_ctx.m_result.error());
-        return true;
-    }
-
-    const size_t n = m_recv_ctx.m_result.value();
-    if (n == 0) {
-        m_owner->setError(MongoError(MONGO_ERROR_CONNECTION_CLOSED,
-                                     "Connection closed while receiving connect/auth reply"));
-        return true;
-    }
-
-    m_owner->m_client.m_ring_buffer.produce(n);
-    return parseAndAdvance();
-}
-
-#ifdef USE_IOURING
-bool MongoConnectAwaitable::ProtocolFlowAwaitable::handleComplete(struct io_uring_cqe* cqe,
-                                                                  GHandle handle)
-{
-    if (m_owner->m_lifecycle != Lifecycle::Running) {
-        return true;
-    }
-
-    if (cqe == nullptr) {
-        return false;
-    }
-
-    switch (m_owner->m_step) {
-    case Step::Connecting:
-        if (!m_connect_ctx.handleComplete(cqe, handle)) {
+            encoded_request.clear();
+            protocol::MongoProtocol::appendOpMsg(
+                encoded_request,
+                client.nextRequestId(),
+                sasl_start);
+            auth_phase = AuthPhase::SaslStartReply;
             return false;
         }
-        return handleConnectResult();
 
-    case Step::Sending:
-        if (m_owner->m_sent >= m_owner->m_encoded_request.size()) {
-            m_owner->m_step = Step::Receiving;
+        std::expected<bool, MongoError> handleSaslStartReply(MongoReply&& reply)
+        {
+            const auto& doc = reply.document();
+
+            auto conversation_id_or_err = readConversationId(doc);
+            if (!conversation_id_or_err) {
+                return std::unexpected(conversation_id_or_err.error());
+            }
+            auth_conversation_id = conversation_id_or_err.value();
+
+            auto server_first_or_err = readBinaryPayloadAsString(doc);
+            if (!server_first_or_err) {
+                return std::unexpected(server_first_or_err.error());
+            }
+            const std::string server_first_message = std::move(server_first_or_err.value());
+
+            const auto kv = parseScramPayload(server_first_message);
+            const auto nonce_it = kv.find("r");
+            const auto salt_it = kv.find("s");
+            const auto iter_it = kv.find("i");
+            if (nonce_it == kv.end() || salt_it == kv.end() || iter_it == kv.end()) {
+                return std::unexpected(MongoError(MONGO_ERROR_AUTH,
+                                                  "Invalid SCRAM server-first-message"));
+            }
+
+            const std::string& server_nonce = nonce_it->second;
+            if (server_nonce.rfind(auth_client_nonce, 0) != 0) {
+                return std::unexpected(MongoError(MONGO_ERROR_AUTH,
+                                                  "SCRAM server nonce does not include client nonce"));
+            }
+
+            int iterations = 0;
+            const auto parse_iter_result = std::from_chars(
+                iter_it->second.data(),
+                iter_it->second.data() + iter_it->second.size(),
+                iterations);
+            if (parse_iter_result.ec != std::errc{} || iterations <= 0) {
+                return std::unexpected(MongoError(MONGO_ERROR_AUTH,
+                                                  "Invalid SCRAM iteration count"));
+            }
+
+            auto salt_or_err = base64Decode(salt_it->second);
+            if (!salt_or_err) {
+                return std::unexpected(MongoError(MONGO_ERROR_AUTH,
+                                                  "Invalid SCRAM salt: " +
+                                                      salt_or_err.error().message()));
+            }
+
+            const std::string client_final_without_proof = "c=biws,r=" + server_nonce;
+            const std::string auth_message = auth_client_first_bare + "," +
+                                             server_first_message + "," +
+                                             client_final_without_proof;
+
+            auto salted_password =
+                pbkdf2HmacSha256(config.password, salt_or_err.value(), iterations);
+            if (!salted_password) {
+                return std::unexpected(salted_password.error());
+            }
+
+            auto client_key = hmacSha256(salted_password.value(), "Client Key");
+            if (!client_key) {
+                return std::unexpected(client_key.error());
+            }
+
+            auto stored_key = sha256(client_key.value());
+            if (!stored_key) {
+                return std::unexpected(stored_key.error());
+            }
+
+            auto client_signature = hmacSha256(stored_key.value(), auth_message);
+            if (!client_signature) {
+                return std::unexpected(client_signature.error());
+            }
+
+            auto server_key = hmacSha256(salted_password.value(), "Server Key");
+            if (!server_key) {
+                return std::unexpected(server_key.error());
+            }
+
+            auto server_signature = hmacSha256(server_key.value(), auth_message);
+            if (!server_signature) {
+                return std::unexpected(server_signature.error());
+            }
+
+            const auto client_proof = xorBytes(client_key.value(), client_signature.value());
+            auth_expected_server_signature = base64Encode(server_signature.value());
+            if (auth_expected_server_signature.empty()) {
+                return std::unexpected(MongoError(MONGO_ERROR_AUTH,
+                                                  "Failed to encode SCRAM server signature"));
+            }
+
+            const std::string client_final_message =
+                client_final_without_proof + ",p=" + base64Encode(client_proof);
+
+            MongoValue::Binary continue_payload(client_final_message.begin(),
+                                                client_final_message.end());
+            MongoDocument sasl_continue;
+            sasl_continue.append("saslContinue", int32_t(1));
+            sasl_continue.append("conversationId", auth_conversation_id);
+            sasl_continue.append("payload", std::move(continue_payload));
+            sasl_continue.append("$db", auth_db);
+
+            encoded_request.clear();
+            protocol::MongoProtocol::appendOpMsg(
+                encoded_request,
+                client.nextRequestId(),
+                sasl_continue);
+            auth_phase = AuthPhase::SaslContinueReply;
             return false;
         }
-        fillSendIovecsFromPayload(m_send_iovecs,
-                                  m_owner->m_encoded_request,
-                                  m_owner->m_sent);
-        syncSendContextIovecs();
-        if (!m_send_ctx.handleComplete(cqe, handle)) {
+
+        std::expected<bool, MongoError> handleSaslContinueReply(MongoReply&& reply)
+        {
+            const auto& doc = reply.document();
+
+            auto server_final_or_err = readBinaryPayloadAsString(doc);
+            if (!server_final_or_err) {
+                return std::unexpected(server_final_or_err.error());
+            }
+
+            const auto kv = parseScramPayload(server_final_or_err.value());
+            const auto error_it = kv.find("e");
+            if (error_it != kv.end()) {
+                return std::unexpected(MongoError(MONGO_ERROR_AUTH,
+                                                  "SCRAM server-final-message error: " +
+                                                      error_it->second));
+            }
+
+            const auto verifier_it = kv.find("v");
+            if (verifier_it == kv.end()) {
+                return std::unexpected(MongoError(MONGO_ERROR_AUTH,
+                                                  "SCRAM server-final-message missing verifier"));
+            }
+
+            if (verifier_it->second != auth_expected_server_signature) {
+                return std::unexpected(MongoError(MONGO_ERROR_AUTH,
+                                                  "SCRAM server signature mismatch"));
+            }
+
+            if (doc.getBool("done", false)) {
+                return true;
+            }
+
+            MongoDocument final_continue;
+            final_continue.append("saslContinue", int32_t(1));
+            final_continue.append("conversationId", auth_conversation_id);
+            final_continue.append("payload", MongoValue::Binary{});
+            final_continue.append("$db", auth_db);
+
+            encoded_request.clear();
+            protocol::MongoProtocol::appendOpMsg(
+                encoded_request,
+                client.nextRequestId(),
+                final_continue);
+            auth_phase = AuthPhase::SaslFinalReply;
             return false;
         }
-        return handleSendResult();
 
-    case Step::Receiving:
-        if (parseAndAdvance()) {
+        std::expected<bool, MongoError> handleSaslFinalReply(MongoReply&& reply)
+        {
+            if (!reply.document().getBool("done", false)) {
+                return std::unexpected(MongoError(MONGO_ERROR_AUTH,
+                                                  "SCRAM authentication not finished"));
+            }
             return true;
         }
-        if (m_owner->m_step == Step::Sending) {
-            return false;
+    };
+
+    static Task<std::expected<size_t, IOError>> writevOnce(AsyncMongoClient& client,
+                                                           std::array<struct iovec, 3>& iovecs,
+                                                           size_t count)
+    {
+        auto awaitable = client.m_socket.writev(iovecs, count);
+        if (client.m_config.isSendTimeoutEnabled()) {
+            co_return co_await awaitable.timeout(client.m_config.send_timeout);
         }
-        if (!prepareReadIovecs()) {
-            return true;
+        co_return co_await awaitable;
+    }
+
+    static Task<std::expected<size_t, IOError>> readvOnce(AsyncMongoClient& client,
+                                                          std::array<struct iovec, 2>& iovecs,
+                                                          size_t count)
+    {
+        auto awaitable = client.m_socket.readv(iovecs, count);
+        if (client.m_config.isRecvTimeoutEnabled()) {
+            co_return co_await awaitable.timeout(client.m_config.recv_timeout);
         }
-        if (!m_recv_ctx.handleComplete(cqe, handle)) {
-            return false;
-        }
-        return handleReadResult();
+        co_return co_await awaitable;
     }
 
-    return true;
-}
-#else
-bool MongoConnectAwaitable::ProtocolFlowAwaitable::handleComplete(GHandle handle)
-{
-    while (m_owner->m_lifecycle == Lifecycle::Running) {
-        switch (m_owner->m_step) {
-        case Step::Connecting:
-            if (!m_connect_ctx.handleComplete(handle)) {
-                return false;
-            }
-            if (handleConnectResult()) {
-                return true;
-            }
-            break;
-
-        case Step::Sending:
-            if (m_owner->m_sent >= m_owner->m_encoded_request.size()) {
-                m_owner->m_step = Step::Receiving;
-                break;
-            }
-            fillSendIovecsFromPayload(m_send_iovecs,
-                                      m_owner->m_encoded_request,
-                                      m_owner->m_sent);
-            syncSendContextIovecs();
-            if (!m_send_ctx.handleComplete(handle)) {
-                return false;
-            }
-            if (handleSendResult()) {
-                return true;
-            }
-            break;
-
-        case Step::Receiving:
-            if (parseAndAdvance()) {
-                return true;
-            }
-            if (m_owner->m_step == Step::Sending) {
-                break;
-            }
-            if (!prepareReadIovecs()) {
-                return true;
-            }
-            if (!m_recv_ctx.handleComplete(handle)) {
-                return false;
-            }
-            if (handleReadResult()) {
-                return true;
-            }
-            break;
-        }
-    }
-
-    return true;
-}
-#endif
-
-MongoConnectAwaitable::MongoConnectAwaitable(AsyncMongoClient& client, MongoConfig config)
-    : CustomAwaitable(client.m_socket.controller())
-    , m_client(client)
-    , m_config(std::move(config))
-    , m_flow_awaitable(this)
-{
-    m_lifecycle = Lifecycle::Running;
-    m_step = Step::Connecting;
-    m_auth_phase = AuthPhase::HelloReply;
-    m_auth_enabled = !m_config.username.empty() || !m_config.password.empty();
-    m_auth_db = !m_config.auth_database.empty()
-        ? m_config.auth_database
-        : (!m_config.database.empty() ? m_config.database : "admin");
-
-    if ((m_config.username.empty() && !m_config.password.empty()) ||
-        (!m_config.username.empty() && m_config.password.empty())) {
-        setError(MongoError(MONGO_ERROR_INVALID_PARAM,
-                            "Both username and password are required for SCRAM authentication"));
-        return;
-    }
-
-    MongoDocument hello;
-    hello.append("hello", int32_t(1));
-    hello.append("helloOk", true);
-    const std::string hello_db =
-        m_config.hello_database.empty() ? std::string("admin") : m_config.hello_database;
-    hello.append("$db", hello_db);
-    hello.append("client", buildClientMetadata(m_config.app_name));
-
-    m_encoded_request.clear();
-    protocol::MongoProtocol::appendOpMsg(m_encoded_request, m_client.nextRequestId(), hello);
-    m_sent = 0;
-
-    addTask(IOEventType::CONNECT, &m_flow_awaitable);
-}
-
-void MongoConnectAwaitable::reset() noexcept
-{
-    m_lifecycle = Lifecycle::Invalid;
-    m_step = Step::Connecting;
-    m_encoded_request.clear();
-    m_sent = 0;
-    m_auth_enabled = false;
-    m_auth_phase = AuthPhase::HelloReply;
-    m_auth_db.clear();
-    m_auth_conversation_id = 0;
-    m_auth_client_nonce.clear();
-    m_auth_client_first_bare.clear();
-    m_auth_expected_server_signature.clear();
-    m_chain_error.reset();
-}
-
-void MongoConnectAwaitable::setError(MongoError error) noexcept
-{
-    m_chain_error = std::move(error);
-    m_lifecycle = Lifecycle::Invalid;
-}
-
-void MongoConnectAwaitable::setConnectError(const IOError& io_error) noexcept
-{
-    setError(mapIoError(io_error, MONGO_ERROR_CONNECTION));
-}
-
-void MongoConnectAwaitable::setSendError(const IOError& io_error) noexcept
-{
-    setError(mapIoError(io_error, MONGO_ERROR_SEND));
-}
-
-void MongoConnectAwaitable::setRecvError(const IOError& io_error) noexcept
-{
-    setError(mapIoError(io_error, MONGO_ERROR_RECV));
-}
-
-std::expected<bool, MongoError> MongoConnectAwaitable::tryParseFromRingBuffer()
-{
-    struct iovec read_iovecs[2];
-    const size_t read_iovecs_count = m_client.m_ring_buffer.getReadIovecs(read_iovecs, 2);
-    if (read_iovecs_count == 0) {
-        return false;
-    }
-
-    auto decode_view_or_err = prepareDecodeView(
-        std::span<const struct iovec>(read_iovecs, read_iovecs_count),
-        m_client.m_decode_scratch);
-    if (!decode_view_or_err) {
-        return std::unexpected(decode_view_or_err.error());
-    }
-    if (!decode_view_or_err->has_value()) {
-        return false;
-    }
-
-    const DecodeView& view = decode_view_or_err->value();
-    auto message =
-        protocol::MongoProtocol::decodeMessage(view.data, static_cast<size_t>(view.msg_len));
-    if (!message) {
-        return std::unexpected(message.error());
-    }
-
-    m_client.m_ring_buffer.consume(static_cast<size_t>(view.msg_len));
-
-    MongoReply reply(std::move(message->body));
-    if (!reply.ok()) {
-        return std::unexpected(MongoError(MONGO_ERROR_SERVER,
-                                          reply.errorCode(),
-                                          reply.errorMessage().empty()
-                                              ? "Mongo connect/auth command failed"
-                                              : reply.errorMessage()));
-    }
-
-    switch (m_auth_phase) {
-    case AuthPhase::HelloReply:
-        return handleHelloReply(std::move(reply));
-    case AuthPhase::SaslStartReply:
-        return handleSaslStartReply(std::move(reply));
-    case AuthPhase::SaslContinueReply:
-        return handleSaslContinueReply(std::move(reply));
-    case AuthPhase::SaslFinalReply:
-        return handleSaslFinalReply(std::move(reply));
-    }
-
-    return std::unexpected(MongoError(MONGO_ERROR_INTERNAL,
-                                      "Unknown auth phase in MongoConnectAwaitable"));
-}
-
-std::expected<bool, MongoError> MongoConnectAwaitable::handleHelloReply(MongoReply&&)
-{
-    if (!m_auth_enabled) {
-        m_client.m_is_closed = false;
-        m_lifecycle = Lifecycle::Done;
-        MongoLogInfo(m_client.m_logger.get(),
-                     "Mongo connected successfully to {}:{}",
-                     m_config.host,
-                     m_config.port);
-        return true;
-    }
-
-    auto nonce_or_err = generateClientNonce();
-    if (!nonce_or_err) {
-        return std::unexpected(nonce_or_err.error());
-    }
-
-    m_auth_client_nonce = std::move(nonce_or_err.value());
-    m_auth_client_first_bare =
-        "n=" + escapeScramUsername(m_config.username) + ",r=" + m_auth_client_nonce;
-    const std::string client_first_message = "n,," + m_auth_client_first_bare;
-
-    MongoValue::Binary payload(client_first_message.begin(), client_first_message.end());
-
-    MongoDocument sasl_start;
-    sasl_start.append("saslStart", int32_t(1));
-    sasl_start.append("mechanism", "SCRAM-SHA-256");
-    sasl_start.append("payload", std::move(payload));
-    sasl_start.append("autoAuthorize", int32_t(1));
-    sasl_start.append("$db", m_auth_db);
-
-    m_encoded_request.clear();
-    protocol::MongoProtocol::appendOpMsg(m_encoded_request,
-                                         m_client.nextRequestId(),
-                                         sasl_start);
-    m_sent = 0;
-    m_auth_phase = AuthPhase::SaslStartReply;
-    return true;
-}
-
-std::expected<bool, MongoError> MongoConnectAwaitable::handleSaslStartReply(MongoReply&& reply)
-{
-    const auto& doc = reply.document();
-
-    auto conversation_id_or_err = readConversationId(doc);
-    if (!conversation_id_or_err) {
-        return std::unexpected(conversation_id_or_err.error());
-    }
-    m_auth_conversation_id = conversation_id_or_err.value();
-
-    auto server_first_or_err = readBinaryPayloadAsString(doc);
-    if (!server_first_or_err) {
-        return std::unexpected(server_first_or_err.error());
-    }
-    const std::string server_first_message = std::move(server_first_or_err.value());
-
-    const auto kv = parseScramPayload(server_first_message);
-    const auto nonce_it = kv.find("r");
-    const auto salt_it = kv.find("s");
-    const auto iter_it = kv.find("i");
-    if (nonce_it == kv.end() || salt_it == kv.end() || iter_it == kv.end()) {
-        return std::unexpected(MongoError(MONGO_ERROR_AUTH,
-                                          "Invalid SCRAM server-first-message"));
-    }
-
-    const std::string& server_nonce = nonce_it->second;
-    if (server_nonce.rfind(m_auth_client_nonce, 0) != 0) {
-        return std::unexpected(MongoError(MONGO_ERROR_AUTH,
-                                          "SCRAM server nonce does not include client nonce"));
-    }
-
-    int iterations = 0;
-    const auto parse_iter_result = std::from_chars(iter_it->second.data(),
-                                                   iter_it->second.data() + iter_it->second.size(),
-                                                   iterations);
-    if (parse_iter_result.ec != std::errc{} || iterations <= 0) {
-        return std::unexpected(MongoError(MONGO_ERROR_AUTH,
-                                          "Invalid SCRAM iteration count"));
-    }
-
-    auto salt_or_err = base64Decode(salt_it->second);
-    if (!salt_or_err) {
-        return std::unexpected(MongoError(MONGO_ERROR_AUTH,
-                                          "Invalid SCRAM salt: " +
-                                          salt_or_err.error().message()));
-    }
-
-    const std::string client_final_without_proof = "c=biws,r=" + server_nonce;
-    const std::string auth_message = m_auth_client_first_bare + "," +
-                                     server_first_message + "," +
-                                     client_final_without_proof;
-
-    auto salted_password = pbkdf2HmacSha256(m_config.password, salt_or_err.value(), iterations);
-    if (!salted_password) {
-        return std::unexpected(salted_password.error());
-    }
-
-    auto client_key = hmacSha256(salted_password.value(), "Client Key");
-    if (!client_key) {
-        return std::unexpected(client_key.error());
-    }
-
-    auto stored_key = sha256(client_key.value());
-    if (!stored_key) {
-        return std::unexpected(stored_key.error());
-    }
-
-    auto client_signature = hmacSha256(stored_key.value(), auth_message);
-    if (!client_signature) {
-        return std::unexpected(client_signature.error());
-    }
-
-    auto server_key = hmacSha256(salted_password.value(), "Server Key");
-    if (!server_key) {
-        return std::unexpected(server_key.error());
-    }
-
-    auto server_signature = hmacSha256(server_key.value(), auth_message);
-    if (!server_signature) {
-        return std::unexpected(server_signature.error());
-    }
-
-    const auto client_proof = xorBytes(client_key.value(), client_signature.value());
-    m_auth_expected_server_signature = base64Encode(server_signature.value());
-    if (m_auth_expected_server_signature.empty()) {
-        return std::unexpected(MongoError(MONGO_ERROR_AUTH,
-                                          "Failed to encode SCRAM server signature"));
-    }
-
-    const std::string client_final_message =
-        client_final_without_proof + ",p=" + base64Encode(client_proof);
-
-    MongoValue::Binary continue_payload(client_final_message.begin(), client_final_message.end());
-    MongoDocument sasl_continue;
-    sasl_continue.append("saslContinue", int32_t(1));
-    sasl_continue.append("conversationId", m_auth_conversation_id);
-    sasl_continue.append("payload", std::move(continue_payload));
-    sasl_continue.append("$db", m_auth_db);
-
-    m_encoded_request.clear();
-    protocol::MongoProtocol::appendOpMsg(m_encoded_request,
-                                         m_client.nextRequestId(),
-                                         sasl_continue);
-    m_sent = 0;
-    m_auth_phase = AuthPhase::SaslContinueReply;
-    return true;
-}
-
-std::expected<bool, MongoError> MongoConnectAwaitable::handleSaslContinueReply(MongoReply&& reply)
-{
-    const auto& doc = reply.document();
-
-    auto server_final_or_err = readBinaryPayloadAsString(doc);
-    if (!server_final_or_err) {
-        return std::unexpected(server_final_or_err.error());
-    }
-
-    const auto kv = parseScramPayload(server_final_or_err.value());
-    const auto error_it = kv.find("e");
-    if (error_it != kv.end()) {
-        return std::unexpected(MongoError(MONGO_ERROR_AUTH,
-                                          "SCRAM server-final-message error: " +
-                                          error_it->second));
-    }
-
-    const auto verifier_it = kv.find("v");
-    if (verifier_it == kv.end()) {
-        return std::unexpected(MongoError(MONGO_ERROR_AUTH,
-                                          "SCRAM server-final-message missing verifier"));
-    }
-
-    if (verifier_it->second != m_auth_expected_server_signature) {
-        return std::unexpected(MongoError(MONGO_ERROR_AUTH,
-                                          "SCRAM server signature mismatch"));
-    }
-
-    if (doc.getBool("done", false)) {
-        m_client.m_is_closed = false;
-        m_lifecycle = Lifecycle::Done;
-        MongoLogInfo(m_client.m_logger.get(),
-                     "Mongo connected and authenticated successfully to {}:{}",
-                     m_config.host,
-                     m_config.port);
-        return true;
-    }
-
-    MongoDocument final_continue;
-    final_continue.append("saslContinue", int32_t(1));
-    final_continue.append("conversationId", m_auth_conversation_id);
-    final_continue.append("payload", MongoValue::Binary{});
-    final_continue.append("$db", m_auth_db);
-
-    m_encoded_request.clear();
-    protocol::MongoProtocol::appendOpMsg(m_encoded_request,
-                                         m_client.nextRequestId(),
-                                         final_continue);
-    m_sent = 0;
-    m_auth_phase = AuthPhase::SaslFinalReply;
-    return true;
-}
-
-std::expected<bool, MongoError> MongoConnectAwaitable::handleSaslFinalReply(MongoReply&& reply)
-{
-    const auto& doc = reply.document();
-    if (!doc.getBool("done", false)) {
-        return std::unexpected(MongoError(MONGO_ERROR_AUTH,
-                                          "SCRAM authentication not finished"));
-    }
-
-    m_client.m_is_closed = false;
-    m_lifecycle = Lifecycle::Done;
-    MongoLogInfo(m_client.m_logger.get(),
-                 "Mongo connected and authenticated successfully to {}:{}",
-                 m_config.host,
-                 m_config.port);
-    return true;
-}
-
-std::expected<bool, MongoError> MongoConnectAwaitable::await_resume()
-{
-    onCompleted();
-
-    if (m_chain_error.has_value()) {
-        auto error = std::move(m_chain_error.value());
-        reset();
-        return std::unexpected(std::move(error));
-    }
-
-    if (m_lifecycle != Lifecycle::Done) {
-        reset();
-        return std::unexpected(MongoError(MONGO_ERROR_INTERNAL,
-                                          "MongoConnectAwaitable resumed before final completion"));
-    }
-
-    reset();
-    return true;
-}
-
-MongoCommandAwaitable::ProtocolFlowAwaitable::ProtocolFlowAwaitable(MongoCommandAwaitable* owner)
-    : m_owner(owner)
-    , m_send_ctx(emptyIovecs(), 0)
-    , m_recv_ctx(emptyIovecs(), 0)
-{
-    m_send_iovecs.reserve(3);
-    m_recv_iovecs.reserve(2);
-    syncSendContextIovecs();
-    syncRecvContextIovecs();
-}
-
-void MongoCommandAwaitable::ProtocolFlowAwaitable::syncSendContextIovecs()
-{
-    m_send_ctx.m_iovecs = std::span<const struct iovec>(m_send_iovecs.data(), m_send_iovecs.size());
-}
-
-void MongoCommandAwaitable::ProtocolFlowAwaitable::syncRecvContextIovecs()
-{
-    m_recv_ctx.m_iovecs = std::span<const struct iovec>(m_recv_iovecs.data(), m_recv_iovecs.size());
-}
-
-IOEventType MongoCommandAwaitable::ProtocolFlowAwaitable::type() const
-{
-    if (m_owner->m_lifecycle != Lifecycle::Running) {
-        return IOEventType::INVALID;
-    }
-
-    switch (m_owner->m_step) {
-    case Step::Sending:
-        return IOEventType::WRITEV;
-    case Step::Receiving:
-        return IOEventType::READV;
-    }
-
-    return IOEventType::INVALID;
-}
-
-bool MongoCommandAwaitable::ProtocolFlowAwaitable::handleSendResult()
-{
-    if (!m_send_ctx.m_result.has_value()) {
-        m_owner->setSendError(m_send_ctx.m_result.error());
-        return true;
-    }
-
-    const size_t sent_once = m_send_ctx.m_result.value();
-    if (sent_once == 0) {
-        m_owner->setError(MongoError(MONGO_ERROR_CONNECTION_CLOSED,
-                                     "Connection closed during command send"));
-        return true;
-    }
-
-    m_owner->m_sent += sent_once;
-    if (m_owner->m_sent >= m_owner->outboundSize()) {
-        m_owner->m_step = Step::Receiving;
-    }
-    return false;
-}
-
-bool MongoCommandAwaitable::ProtocolFlowAwaitable::prepareReadIovecs()
-{
-    if (!fillReadIovecs(m_owner->m_client.m_ring_buffer, m_recv_iovecs)) {
-        m_owner->setError(MongoError(MONGO_ERROR_RECV,
-                                     "No writable ring buffer space while receiving command reply"));
-        syncRecvContextIovecs();
-        return false;
-    }
-    syncRecvContextIovecs();
-    return true;
-}
-
-bool MongoCommandAwaitable::ProtocolFlowAwaitable::parseAndAdvance()
-{
-    auto parse_result = m_owner->tryParseFromRingBuffer();
-    if (!parse_result.has_value()) {
-        m_owner->setError(std::move(parse_result.error()));
-        return true;
-    }
-    return parse_result.value();
-}
-
-bool MongoCommandAwaitable::ProtocolFlowAwaitable::handleReadResult()
-{
-    if (!m_recv_ctx.m_result.has_value()) {
-        m_owner->setRecvError(m_recv_ctx.m_result.error());
-        return true;
-    }
-
-    const size_t n = m_recv_ctx.m_result.value();
-    if (n == 0) {
-        m_owner->setError(MongoError(MONGO_ERROR_CONNECTION_CLOSED,
-                                     "Connection closed while receiving command reply"));
-        return true;
-    }
-
-    m_owner->m_client.m_ring_buffer.produce(n);
-    return parseAndAdvance();
-}
-
-#ifdef USE_IOURING
-bool MongoCommandAwaitable::ProtocolFlowAwaitable::handleComplete(struct io_uring_cqe* cqe,
-                                                                  GHandle handle)
-{
-    if (m_owner->m_lifecycle != Lifecycle::Running) {
-        return true;
-    }
-
-    if (cqe == nullptr) {
-        return false;
-    }
-
-    switch (m_owner->m_step) {
-    case Step::Sending:
-        if (m_owner->m_sent >= m_owner->outboundSize()) {
-            m_owner->m_step = Step::Receiving;
-            return false;
-        }
-        m_owner->fillSendIovecs(m_send_iovecs);
-        syncSendContextIovecs();
-        if (!m_send_ctx.handleComplete(cqe, handle)) {
-            return false;
-        }
-        return handleSendResult();
-
-    case Step::Receiving:
-        if (parseAndAdvance()) {
-            return true;
-        }
-        if (!prepareReadIovecs()) {
-            return true;
-        }
-        if (!m_recv_ctx.handleComplete(cqe, handle)) {
-            return false;
-        }
-        return handleReadResult();
-    }
-
-    return true;
-}
-#else
-bool MongoCommandAwaitable::ProtocolFlowAwaitable::handleComplete(GHandle handle)
-{
-    while (m_owner->m_lifecycle == Lifecycle::Running) {
-        switch (m_owner->m_step) {
-        case Step::Sending:
-            if (m_owner->m_sent >= m_owner->outboundSize()) {
-                m_owner->m_step = Step::Receiving;
-                break;
-            }
-            m_owner->fillSendIovecs(m_send_iovecs);
-            syncSendContextIovecs();
-            if (!m_send_ctx.handleComplete(handle)) {
-                return false;
-            }
-            if (handleSendResult()) {
-                return true;
-            }
-            break;
-
-        case Step::Receiving:
-            if (parseAndAdvance()) {
-                return true;
-            }
-            if (!prepareReadIovecs()) {
-                return true;
-            }
-            if (!m_recv_ctx.handleComplete(handle)) {
-                return false;
-            }
-            if (handleReadResult()) {
-                return true;
-            }
-            break;
-        }
-    }
-
-    return true;
-}
-#endif
-
-MongoCommandAwaitable::MongoCommandAwaitable(AsyncMongoClient& client,
-                                             std::string database,
-                                             MongoDocument command)
-    : MongoCommandAwaitable(client)
-{
-    arm(std::move(database), std::move(command));
-}
-
-MongoCommandAwaitable::MongoCommandAwaitable(AsyncMongoClient& client)
-    : CustomAwaitable(client.m_socket.controller())
-    , m_client(client)
-    , m_flow_awaitable(this)
-{
-}
-
-void MongoCommandAwaitable::reset() noexcept
-{
-    m_lifecycle = Lifecycle::Invalid;
-    m_step = Step::Sending;
-    m_send_path = SendPath::EncodedRequest;
-    m_encoded_request.clear();
-    m_sent = 0;
-    m_reply.reset();
-    m_chain_error.reset();
-}
-
-void MongoCommandAwaitable::arm(std::string database, MongoDocument command)
-{
-    m_lifecycle = Lifecycle::Running;
-    m_step = Step::Sending;
-    m_sent = 0;
-    m_reply.reset();
-    m_chain_error.reset();
-
-    if (isSimplePingCommand(command, database)) {
-        if (m_ping_encoded_template.empty() || m_ping_template_db != database) {
-            m_ping_template_db = database;
-            m_ping_encoded_template.clear();
-            protocol::MongoProtocol::appendOpMsgWithDatabase(m_ping_encoded_template,
-                                                             0,
-                                                             command,
-                                                             database);
-        }
-        m_send_path = SendPath::PingTemplate;
-        m_encoded_request.clear();
-        m_request_id = m_client.nextRequestId();
-        writeInt32LE(m_ping_request_id_le.data(), m_request_id);
-    } else {
-        m_send_path = SendPath::EncodedRequest;
-        m_encoded_request.clear();
-        m_request_id = m_client.nextRequestId();
-        protocol::MongoProtocol::appendOpMsgWithDatabase(m_encoded_request,
-                                                         m_request_id,
-                                                         command,
-                                                         database);
-    }
-
-    m_tasks.clear();
-    m_cursor = 0;
-    addTask(IOEventType::WRITEV, &m_flow_awaitable);
-}
-
-void MongoCommandAwaitable::armPing(std::string database)
-{
-    m_lifecycle = Lifecycle::Running;
-    m_step = Step::Sending;
-    m_sent = 0;
-    m_reply.reset();
-    m_chain_error.reset();
-    m_send_path = SendPath::PingTemplate;
-    m_encoded_request.clear();
-
-    if (m_ping_encoded_template.empty() || m_ping_template_db != database) {
-        MongoDocument ping_doc;
-        ping_doc.append("ping", int32_t(1));
-        m_ping_template_db = database;
-        m_ping_encoded_template.clear();
-        protocol::MongoProtocol::appendOpMsgWithDatabase(m_ping_encoded_template,
-                                                         0,
-                                                         ping_doc,
-                                                         database);
-    }
-
-    m_request_id = m_client.nextRequestId();
-    writeInt32LE(m_ping_request_id_le.data(), m_request_id);
-
-    m_tasks.clear();
-    m_cursor = 0;
-    addTask(IOEventType::WRITEV, &m_flow_awaitable);
-}
-
-size_t MongoCommandAwaitable::outboundSize() const noexcept
-{
-    if (m_send_path == SendPath::PingTemplate) {
-        return m_ping_encoded_template.size();
-    }
-    return m_encoded_request.size();
-}
-
-void MongoCommandAwaitable::fillSendIovecs(std::vector<struct iovec>& iovecs) const
-{
-    if (m_send_path == SendPath::PingTemplate) {
-        if (m_ping_encoded_template.size() < 8) {
-            iovecs.clear();
-            return;
+    static Task<std::expected<void, MongoError>> connectSocket(AsyncMongoClient& client,
+                                                               const MongoConfig& config)
+    {
+        client.m_socket.option().handleNonBlock();
+
+        galay::kernel::Host host(galay::kernel::IPType::IPV4, config.host, config.port);
+        auto connect_result = co_await client.m_socket.connect(host);
+        if (!connect_result.has_value()) {
+            co_return std::unexpected(mapIoError(connect_result.error(), MONGO_ERROR_CONNECTION));
         }
 
-        const std::array<SendSegment, 3> segments{{
-            SendSegment{m_ping_encoded_template.data(), 4},
-            SendSegment{m_ping_request_id_le.data(), m_ping_request_id_le.size()},
-            SendSegment{m_ping_encoded_template.data() + 8, m_ping_encoded_template.size() - 8},
-        }};
-        fillSendIovecsFromSegments(iovecs, std::span<const SendSegment>(segments), m_sent);
-        return;
+        trySetTcpNoDelay(client.m_socket.handle().fd, config.tcp_nodelay);
+        co_return std::expected<void, MongoError>{};
     }
 
-    fillSendIovecsFromPayload(iovecs, m_encoded_request, m_sent);
-}
-
-void MongoCommandAwaitable::setError(MongoError error) noexcept
-{
-    m_chain_error = std::move(error);
-    m_lifecycle = Lifecycle::Invalid;
-}
-
-void MongoCommandAwaitable::setSendError(const IOError& io_error) noexcept
-{
-    setError(mapIoError(io_error, MONGO_ERROR_SEND));
-}
-
-void MongoCommandAwaitable::setRecvError(const IOError& io_error) noexcept
-{
-    setError(mapIoError(io_error, MONGO_ERROR_RECV));
-}
-
-std::expected<bool, MongoError> MongoCommandAwaitable::tryParseFromRingBuffer()
-{
-    struct iovec read_iovecs[2];
-    const size_t read_iovecs_count = m_client.m_ring_buffer.getReadIovecs(read_iovecs, 2);
-    if (read_iovecs_count == 0) {
-        return false;
-    }
-
-    auto decode_view_or_err = prepareDecodeView(
-        std::span<const struct iovec>(read_iovecs, read_iovecs_count),
-        m_client.m_decode_scratch);
-    if (!decode_view_or_err) {
-        return std::unexpected(decode_view_or_err.error());
-    }
-    if (!decode_view_or_err->has_value()) {
-        return false;
-    }
-
-    const DecodeView& view = decode_view_or_err->value();
-    auto message =
-        protocol::MongoProtocol::decodeMessage(view.data, static_cast<size_t>(view.msg_len));
-    if (!message) {
-        return std::unexpected(message.error());
-    }
-
-    if (message->header.response_to != m_request_id) {
-        return std::unexpected(MongoError(MONGO_ERROR_PROTOCOL,
-                                          "Response responseTo does not match sent requestId"));
-    }
-
-    m_client.m_ring_buffer.consume(static_cast<size_t>(view.msg_len));
-
-    MongoReply reply(std::move(message->body));
-    if (!reply.ok()) {
-        return std::unexpected(MongoError(MONGO_ERROR_SERVER,
-                                          reply.errorCode(),
-                                          reply.errorMessage().empty()
-                                              ? "Mongo command failed"
-                                              : reply.errorMessage()));
-    }
-
-    m_reply = std::move(reply);
-    m_lifecycle = Lifecycle::Done;
-    return true;
-}
-
-std::expected<MongoReply, MongoError> MongoCommandAwaitable::await_resume()
-{
-    onCompleted();
-
-    if (m_chain_error.has_value()) {
-        auto error = std::move(m_chain_error.value());
-        reset();
-        return std::unexpected(std::move(error));
-    }
-
-    if (m_lifecycle != Lifecycle::Done || !m_reply.has_value()) {
-        reset();
-        return std::unexpected(MongoError(MONGO_ERROR_INTERNAL,
-                                          "MongoCommandAwaitable resumed before final completion"));
-    }
-
-    MongoReply reply = std::move(m_reply.value());
-    reset();
-    return reply;
-}
-
-MongoPipelineAwaitable::ProtocolFlowAwaitable::ProtocolFlowAwaitable(MongoPipelineAwaitable* owner)
-    : m_owner(owner)
-    , m_send_ctx(emptyIovecs(), 0)
-    , m_recv_ctx(emptyIovecs(), 0)
-{
-    m_send_iovecs.reserve(1);
-    m_recv_iovecs.reserve(2);
-    syncSendContextIovecs();
-    syncRecvContextIovecs();
-}
-
-void MongoPipelineAwaitable::ProtocolFlowAwaitable::syncSendContextIovecs()
-{
-    m_send_ctx.m_iovecs = std::span<const struct iovec>(m_send_iovecs.data(), m_send_iovecs.size());
-}
-
-void MongoPipelineAwaitable::ProtocolFlowAwaitable::syncRecvContextIovecs()
-{
-    m_recv_ctx.m_iovecs = std::span<const struct iovec>(m_recv_iovecs.data(), m_recv_iovecs.size());
-}
-
-IOEventType MongoPipelineAwaitable::ProtocolFlowAwaitable::type() const
-{
-    if (m_owner->m_lifecycle != Lifecycle::Running) {
-        return IOEventType::INVALID;
-    }
-
-    switch (m_owner->m_step) {
-    case Step::Sending:
-        return IOEventType::WRITEV;
-    case Step::Receiving:
-        return IOEventType::READV;
-    }
-
-    return IOEventType::INVALID;
-}
-
-bool MongoPipelineAwaitable::ProtocolFlowAwaitable::handleSendResult()
-{
-    if (!m_send_ctx.m_result.has_value()) {
-        m_owner->setSendError(m_send_ctx.m_result.error());
-        return true;
-    }
-
-    const size_t sent_once = m_send_ctx.m_result.value();
-    if (sent_once == 0) {
-        m_owner->setError(MongoError(MONGO_ERROR_CONNECTION_CLOSED,
-                                     "Connection closed during pipeline send"));
-        return true;
-    }
-
-    m_owner->m_sent += sent_once;
-    if (m_owner->m_sent >= m_owner->m_encoded_batch.size()) {
-        m_owner->m_step = Step::Receiving;
-    }
-    return false;
-}
-
-bool MongoPipelineAwaitable::ProtocolFlowAwaitable::prepareReadIovecs()
-{
-    if (!fillReadIovecs(m_owner->m_client.m_ring_buffer, m_recv_iovecs)) {
-        m_owner->setError(MongoError(MONGO_ERROR_RECV,
-                                     "No writable ring buffer space while receiving pipeline replies"));
-        syncRecvContextIovecs();
-        return false;
-    }
-    syncRecvContextIovecs();
-    return true;
-}
-
-bool MongoPipelineAwaitable::ProtocolFlowAwaitable::parseAndAdvance()
-{
-    auto parse_result = m_owner->tryParseFromRingBuffer();
-    if (!parse_result.has_value()) {
-        m_owner->setError(std::move(parse_result.error()));
-        return true;
-    }
-    return parse_result.value();
-}
-
-bool MongoPipelineAwaitable::ProtocolFlowAwaitable::handleReadResult()
-{
-    if (!m_recv_ctx.m_result.has_value()) {
-        m_owner->setRecvError(m_recv_ctx.m_result.error());
-        return true;
-    }
-
-    const size_t n = m_recv_ctx.m_result.value();
-    if (n == 0) {
-        m_owner->setError(MongoError(MONGO_ERROR_CONNECTION_CLOSED,
-                                     "Connection closed while receiving pipeline replies"));
-        return true;
-    }
-
-    m_owner->m_client.m_ring_buffer.produce(n);
-    return parseAndAdvance();
-}
-
-#ifdef USE_IOURING
-bool MongoPipelineAwaitable::ProtocolFlowAwaitable::handleComplete(struct io_uring_cqe* cqe,
-                                                                   GHandle handle)
-{
-    if (m_owner->m_lifecycle != Lifecycle::Running) {
-        return true;
-    }
-
-    if (cqe == nullptr) {
-        return false;
-    }
-
-    switch (m_owner->m_step) {
-    case Step::Sending:
-        if (m_owner->m_sent >= m_owner->m_encoded_batch.size()) {
-            m_owner->m_step = Step::Receiving;
-            return false;
-        }
-        fillSendIovecsFromPayload(m_send_iovecs,
-                                  m_owner->m_encoded_batch,
-                                  m_owner->m_sent);
-        syncSendContextIovecs();
-        if (!m_send_ctx.handleComplete(cqe, handle)) {
-            return false;
-        }
-        return handleSendResult();
-
-    case Step::Receiving:
-        if (parseAndAdvance()) {
-            return true;
-        }
-        if (!prepareReadIovecs()) {
-            return true;
-        }
-        if (!m_recv_ctx.handleComplete(cqe, handle)) {
-            return false;
-        }
-        return handleReadResult();
-    }
-
-    return true;
-}
-#else
-bool MongoPipelineAwaitable::ProtocolFlowAwaitable::handleComplete(GHandle handle)
-{
-    while (m_owner->m_lifecycle == Lifecycle::Running) {
-        switch (m_owner->m_step) {
-        case Step::Sending:
-            if (m_owner->m_sent >= m_owner->m_encoded_batch.size()) {
-                m_owner->m_step = Step::Receiving;
-                break;
-            }
-            fillSendIovecsFromPayload(m_send_iovecs,
-                                      m_owner->m_encoded_batch,
-                                      m_owner->m_sent);
-            syncSendContextIovecs();
-            if (!m_send_ctx.handleComplete(handle)) {
-                return false;
-            }
-            if (handleSendResult()) {
-                return true;
-            }
-            break;
-
-        case Step::Receiving:
-            if (parseAndAdvance()) {
-                return true;
-            }
-            if (!prepareReadIovecs()) {
-                return true;
-            }
-            if (!m_recv_ctx.handleComplete(handle)) {
-                return false;
-            }
-            if (handleReadResult()) {
-                return true;
-            }
-            break;
-        }
-    }
-
-    return true;
-}
-#endif
-
-MongoPipelineAwaitable::MongoPipelineAwaitable(AsyncMongoClient& client,
-                                               std::string database,
-                                               std::span<const MongoDocument> commands)
-    : CustomAwaitable(client.m_socket.controller())
-    , m_client(client)
-    , m_flow_awaitable(this)
-{
-    arm(std::move(database), commands);
-}
-
-void MongoPipelineAwaitable::reset() noexcept
-{
-    m_lifecycle = Lifecycle::Invalid;
-    m_step = Step::Sending;
-    m_tasks.clear();
-    m_cursor = 0;
-    m_encoded_batch.clear();
-    m_sent = 0;
-    m_received = 0;
-    m_first_request_id = 0;
-    m_responses.clear();
-    m_chain_error.reset();
-}
-
-void MongoPipelineAwaitable::arm(std::string database, std::span<const MongoDocument> commands)
-{
-    m_lifecycle = Lifecycle::Running;
-    m_step = Step::Sending;
-    m_tasks.clear();
-    m_cursor = 0;
-    m_sent = 0;
-    m_received = 0;
-    m_first_request_id = 0;
-    m_responses.clear();
-    m_chain_error.reset();
-
-    if (commands.empty()) {
-        setError(MongoError(MONGO_ERROR_INVALID_PARAM, "Pipeline commands must not be empty"));
-        return;
-    }
-    if (commands.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
-        setError(MongoError(MONGO_ERROR_INVALID_PARAM, "Pipeline commands exceed supported size"));
-        return;
-    }
-
-    m_responses.resize(commands.size());
-    m_encoded_batch.clear();
-
-    const int32_t first_request_id = m_client.reserveRequestIdBlock(commands.size());
-    m_first_request_id = first_request_id;
-
-    for (size_t i = 0; i < commands.size(); ++i) {
-        const int32_t request_id =
-            static_cast<int32_t>(static_cast<int64_t>(first_request_id) + static_cast<int64_t>(i));
-        m_responses[i].request_id = request_id;
-    }
-
-    m_encoded_batch = protocol::MongoCommandBuilder::encodePipeline(
-        database,
-        first_request_id,
-        commands,
-        m_client.m_pipeline_reserve_per_command);
-
-    addTask(IOEventType::WRITEV, &m_flow_awaitable);
-}
-
-void MongoPipelineAwaitable::setError(MongoError error) noexcept
-{
-    m_chain_error = std::move(error);
-    m_lifecycle = Lifecycle::Invalid;
-}
-
-void MongoPipelineAwaitable::setSendError(const IOError& io_error) noexcept
-{
-    setError(mapIoError(io_error, MONGO_ERROR_SEND));
-}
-
-void MongoPipelineAwaitable::setRecvError(const IOError& io_error) noexcept
-{
-    setError(mapIoError(io_error, MONGO_ERROR_RECV));
-}
-
-std::expected<bool, MongoError> MongoPipelineAwaitable::tryParseFromRingBuffer()
-{
-    while (m_received < m_responses.size()) {
+    static std::expected<std::optional<protocol::MongoMessage>, MongoError>
+    tryParseMessage(AsyncMongoClient& client)
+    {
         struct iovec read_iovecs[2];
-        const size_t read_iovecs_count = m_client.m_ring_buffer.getReadIovecs(read_iovecs, 2);
+        const size_t read_iovecs_count = client.m_ring_buffer.getReadIovecs(read_iovecs, 2);
         if (read_iovecs_count == 0) {
-            return false;
+            return std::optional<protocol::MongoMessage>{};
         }
 
         auto decode_view_or_err = prepareDecodeView(
             std::span<const struct iovec>(read_iovecs, read_iovecs_count),
-            m_client.m_decode_scratch);
+            client.m_decode_scratch);
         if (!decode_view_or_err) {
             return std::unexpected(decode_view_or_err.error());
         }
         if (!decode_view_or_err->has_value()) {
-            return false;
+            return std::optional<protocol::MongoMessage>{};
         }
 
         const DecodeView& view = decode_view_or_err->value();
@@ -1748,70 +796,331 @@ std::expected<bool, MongoError> MongoPipelineAwaitable::tryParseFromRingBuffer()
             return std::unexpected(message.error());
         }
 
-        m_client.m_ring_buffer.consume(static_cast<size_t>(view.msg_len));
+        client.m_ring_buffer.consume(static_cast<size_t>(view.msg_len));
+        return std::optional<protocol::MongoMessage>(std::move(message.value()));
+    }
 
-        const int32_t response_to = message->header.response_to;
-        if (response_to <= 0) {
-            return std::unexpected(MongoError(MONGO_ERROR_PROTOCOL,
-                                              "Pipeline response has invalid responseTo"));
+    static Task<std::expected<protocol::MongoMessage, MongoError>>
+    recvMessage(AsyncMongoClient& client,
+                MongoErrorType io_error_type,
+                std::string_view closed_message,
+                std::string_view no_space_message)
+    {
+        while (true) {
+            auto message_or_err = tryParseMessage(client);
+            if (!message_or_err) {
+                co_return std::unexpected(std::move(message_or_err.error()));
+            }
+            if (message_or_err->has_value()) {
+                co_return std::move(message_or_err->value());
+            }
+
+            struct iovec read_iovecs[2];
+            const size_t count = client.m_ring_buffer.getWriteIovecs(read_iovecs, 2);
+            if (count == 0) {
+                co_return std::unexpected(
+                    MongoError(MONGO_ERROR_RECV, std::string(no_space_message)));
+            }
+
+            std::array<struct iovec, 2> borrowed_iovecs{};
+            for (size_t i = 0; i < count; ++i) {
+                borrowed_iovecs[i] = read_iovecs[i];
+            }
+
+            auto read_result = co_await readvOnce(client, borrowed_iovecs, count);
+            if (!read_result.has_value()) {
+                co_return std::unexpected(mapIoError(read_result.error(), io_error_type));
+            }
+            if (read_result.value() == 0) {
+                co_return std::unexpected(
+                    MongoError(MONGO_ERROR_CONNECTION_CLOSED, std::string(closed_message)));
+            }
+            client.m_ring_buffer.produce(read_result.value());
+        }
+    }
+
+    static Task<std::expected<bool, MongoError>> sendSegments(
+        AsyncMongoClient& client,
+        std::span<const SendSegment> segments,
+        MongoErrorType io_error_type,
+        std::string_view closed_message)
+    {
+        size_t total_len = 0;
+        for (const auto& segment : segments) {
+            total_len += segment.len;
         }
 
-        const int64_t first_request_id = static_cast<int64_t>(m_first_request_id);
-        const int64_t response_to_i64 = static_cast<int64_t>(response_to);
-        const int64_t index_i64 = response_to_i64 - first_request_id;
-        if (index_i64 < 0 || index_i64 >= static_cast<int64_t>(m_responses.size())) {
-            return std::unexpected(MongoError(MONGO_ERROR_PROTOCOL,
-                                              "Pipeline responseTo does not match any in-flight requestId"));
-        }
-        const size_t index = static_cast<size_t>(index_i64);
-        auto& slot = m_responses[index];
-        if (slot.request_id != response_to) {
-            return std::unexpected(MongoError(MONGO_ERROR_PROTOCOL,
-                                              "Pipeline responseTo does not map to expected requestId"));
-        }
-        if (slot.reply.has_value() || slot.error.has_value()) {
-            return std::unexpected(MongoError(MONGO_ERROR_PROTOCOL,
-                                              "Pipeline received duplicate response for the same requestId"));
+        size_t sent = 0;
+        std::vector<struct iovec> iovecs;
+        iovecs.reserve(segments.size());
+
+        while (sent < total_len) {
+            fillSendIovecsFromSegments(iovecs, segments, sent);
+            if (iovecs.empty()) {
+                co_return std::unexpected(MongoError(MONGO_ERROR_INTERNAL,
+                                                     "sendSegments produced empty iovecs"));
+            }
+
+            std::array<struct iovec, 3> borrowed_iovecs{};
+            for (size_t i = 0; i < iovecs.size(); ++i) {
+                borrowed_iovecs[i] = iovecs[i];
+            }
+
+            auto write_result = co_await writevOnce(client, borrowed_iovecs, iovecs.size());
+            if (!write_result.has_value()) {
+                co_return std::unexpected(mapIoError(write_result.error(), io_error_type));
+            }
+            if (write_result.value() == 0) {
+                co_return std::unexpected(
+                    MongoError(MONGO_ERROR_CONNECTION_CLOSED, std::string(closed_message)));
+            }
+
+            sent += write_result.value();
         }
 
-        MongoReply reply(std::move(message->body));
-        if (reply.ok()) {
-            slot.reply = std::move(reply);
+        co_return true;
+    }
+
+    static MongoConnectAwaitable connect(AsyncMongoClient& client, MongoConfig config)
+    {
+        client.m_ring_buffer.clear();
+        client.m_decode_scratch.clear();
+
+        ConnectFlowState state(client, std::move(config));
+        auto init_result = state.initialize();
+        if (!init_result.has_value()) {
+            co_return std::unexpected(std::move(init_result.error()));
+        }
+
+        auto connect_result = co_await connectSocket(client, state.config);
+        if (!connect_result.has_value()) {
+            co_return std::unexpected(std::move(connect_result.error()));
+        }
+
+        while (true) {
+            const std::array<SendSegment, 1> segments{{
+                SendSegment{state.encoded_request.data(), state.encoded_request.size()}
+            }};
+            auto send_result = co_await sendSegments(
+                client,
+                std::span<const SendSegment>(segments),
+                MONGO_ERROR_SEND,
+                "Connection closed during connect/auth request send");
+            if (!send_result.has_value()) {
+                co_return std::unexpected(std::move(send_result.error()));
+            }
+
+            auto message_result = co_await recvMessage(
+                client,
+                MONGO_ERROR_RECV,
+                "Connection closed while receiving connect/auth reply",
+                "No writable ring buffer space while receiving connect/auth reply");
+            if (!message_result.has_value()) {
+                co_return std::unexpected(std::move(message_result.error()));
+            }
+
+            MongoReply reply(std::move(message_result->body));
+            if (!reply.ok()) {
+                co_return std::unexpected(makeServerError(
+                    std::move(reply),
+                    "Mongo connect/auth command failed"));
+            }
+
+            auto next_result = state.handleReply(std::move(reply));
+            if (!next_result.has_value()) {
+                co_return std::unexpected(std::move(next_result.error()));
+            }
+            if (next_result.value()) {
+                client.m_is_closed = false;
+                if (state.auth_enabled) {
+                    MongoLogInfo(client.m_logger.get(),
+                                 "Mongo connected and authenticated successfully to {}:{}",
+                                 state.config.host,
+                                 state.config.port);
+                } else {
+                    MongoLogInfo(client.m_logger.get(),
+                                 "Mongo connected successfully to {}:{}",
+                                 state.config.host,
+                                 state.config.port);
+                }
+                co_return true;
+            }
+        }
+    }
+
+    static MongoCommandAwaitable command(AsyncMongoClient& client,
+                                         std::string database,
+                                         MongoDocument command)
+    {
+        if (client.m_is_closed) {
+            co_return std::unexpected(MongoError(MONGO_ERROR_CONNECTION,
+                                                 "Mongo client is not connected"));
+        }
+
+        const int32_t request_id = client.nextRequestId();
+        std::array<char, 4> request_id_le{};
+        writeInt32LE(request_id_le.data(), request_id);
+
+        std::string encoded_request;
+        std::array<SendSegment, 3> send_segments{};
+        size_t send_segment_count = 0;
+
+        if (isSimplePingCommand(command, database)) {
+            if (client.m_ping_encoded_template.empty() || client.m_ping_template_db != database) {
+                client.m_ping_template_db = database;
+                client.m_ping_encoded_template.clear();
+                protocol::MongoProtocol::appendOpMsgWithDatabase(
+                    client.m_ping_encoded_template,
+                    0,
+                    command,
+                    database);
+            }
+
+            if (client.m_ping_encoded_template.size() < 8) {
+                co_return std::unexpected(MongoError(MONGO_ERROR_INTERNAL,
+                                                     "Invalid cached ping template"));
+            }
+
+            send_segments[0] = SendSegment{client.m_ping_encoded_template.data(), 4};
+            send_segments[1] = SendSegment{request_id_le.data(), request_id_le.size()};
+            send_segments[2] = SendSegment{
+                client.m_ping_encoded_template.data() + 8,
+                client.m_ping_encoded_template.size() - 8
+            };
+            send_segment_count = 3;
         } else {
-            slot.error = MongoError(MONGO_ERROR_SERVER,
-                                    reply.errorCode(),
-                                    reply.errorMessage().empty()
-                                        ? "Mongo pipeline command failed"
-                                        : reply.errorMessage());
+            protocol::MongoProtocol::appendOpMsgWithDatabase(
+                encoded_request,
+                request_id,
+                command,
+                database);
+            send_segments[0] = SendSegment{encoded_request.data(), encoded_request.size()};
+            send_segment_count = 1;
         }
 
-        ++m_received;
+        auto send_result = co_await sendSegments(
+            client,
+            std::span<const SendSegment>(send_segments.data(), send_segment_count),
+            MONGO_ERROR_SEND,
+            "Connection closed during command send");
+        if (!send_result.has_value()) {
+            co_return std::unexpected(std::move(send_result.error()));
+        }
+
+        auto message_result = co_await recvMessage(
+            client,
+            MONGO_ERROR_RECV,
+            "Connection closed while receiving command reply",
+            "No writable ring buffer space while receiving command reply");
+        if (!message_result.has_value()) {
+            co_return std::unexpected(std::move(message_result.error()));
+        }
+        if (message_result->header.response_to != request_id) {
+            co_return std::unexpected(MongoError(
+                MONGO_ERROR_PROTOCOL,
+                "Response responseTo does not match sent requestId"));
+        }
+
+        MongoReply reply(std::move(message_result->body));
+        if (!reply.ok()) {
+            co_return std::unexpected(makeServerError(std::move(reply), "Mongo command failed"));
+        }
+
+        co_return std::move(reply);
     }
 
-    m_lifecycle = Lifecycle::Done;
-    return true;
-}
+    static MongoPipelineAwaitable pipeline(AsyncMongoClient& client,
+                                           std::string database,
+                                           std::span<const MongoDocument> commands)
+    {
+        if (client.m_is_closed) {
+            co_return std::unexpected(MongoError(MONGO_ERROR_CONNECTION,
+                                                 "Mongo client is not connected"));
+        }
+        if (commands.empty()) {
+            co_return std::unexpected(MongoError(MONGO_ERROR_INVALID_PARAM,
+                                                 "Pipeline commands must not be empty"));
+        }
+        if (commands.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
+            co_return std::unexpected(MongoError(MONGO_ERROR_INVALID_PARAM,
+                                                 "Pipeline commands exceed supported size"));
+        }
 
-std::expected<std::vector<MongoPipelineResponse>, MongoError> MongoPipelineAwaitable::await_resume()
-{
-    onCompleted();
+        std::vector<MongoPipelineResponse> responses(commands.size());
+        const int32_t first_request_id = client.reserveRequestIdBlock(commands.size());
+        for (size_t i = 0; i < commands.size(); ++i) {
+            responses[i].request_id = static_cast<int32_t>(
+                static_cast<int64_t>(first_request_id) + static_cast<int64_t>(i));
+        }
 
-    if (m_chain_error.has_value()) {
-        auto error = std::move(m_chain_error.value());
-        reset();
-        return std::unexpected(std::move(error));
+        const std::string encoded_batch = protocol::MongoCommandBuilder::encodePipeline(
+            database,
+            first_request_id,
+            commands,
+            client.m_pipeline_reserve_per_command);
+
+        const std::array<SendSegment, 1> send_segments{{
+            SendSegment{encoded_batch.data(), encoded_batch.size()}
+        }};
+        auto send_result = co_await sendSegments(
+            client,
+            std::span<const SendSegment>(send_segments),
+            MONGO_ERROR_SEND,
+            "Connection closed during pipeline send");
+        if (!send_result.has_value()) {
+            co_return std::unexpected(std::move(send_result.error()));
+        }
+
+        size_t received = 0;
+        while (received < responses.size()) {
+            auto message_result = co_await recvMessage(
+                client,
+                MONGO_ERROR_RECV,
+                "Connection closed while receiving pipeline replies",
+                "No writable ring buffer space while receiving pipeline replies");
+            if (!message_result.has_value()) {
+                co_return std::unexpected(std::move(message_result.error()));
+            }
+
+            const int32_t response_to = message_result->header.response_to;
+            if (response_to <= 0) {
+                co_return std::unexpected(MongoError(MONGO_ERROR_PROTOCOL,
+                                                     "Pipeline response has invalid responseTo"));
+            }
+
+            const int64_t index_i64 =
+                static_cast<int64_t>(response_to) - static_cast<int64_t>(first_request_id);
+            if (index_i64 < 0 || index_i64 >= static_cast<int64_t>(responses.size())) {
+                co_return std::unexpected(MongoError(
+                    MONGO_ERROR_PROTOCOL,
+                    "Pipeline responseTo does not match any in-flight requestId"));
+            }
+
+            auto& slot = responses[static_cast<size_t>(index_i64)];
+            if (slot.request_id != response_to) {
+                co_return std::unexpected(MongoError(
+                    MONGO_ERROR_PROTOCOL,
+                    "Pipeline responseTo does not map to expected requestId"));
+            }
+            if (slot.reply.has_value() || slot.error.has_value()) {
+                co_return std::unexpected(MongoError(
+                    MONGO_ERROR_PROTOCOL,
+                    "Pipeline received duplicate response for the same requestId"));
+            }
+
+            MongoReply reply(std::move(message_result->body));
+            if (reply.ok()) {
+                slot.reply = std::move(reply);
+            } else {
+                slot.error = makeServerError(std::move(reply), "Mongo pipeline command failed");
+            }
+
+            ++received;
+        }
+
+        co_return responses;
     }
-
-    if (m_lifecycle != Lifecycle::Done || m_received != m_responses.size()) {
-        reset();
-        return std::unexpected(MongoError(MONGO_ERROR_INTERNAL,
-                                          "MongoPipelineAwaitable resumed before final completion"));
-    }
-
-    auto responses = std::move(m_responses);
-    reset();
-    return responses;
-}
+};
 
 int32_t AsyncMongoClient::reserveRequestIdBlock(size_t count)
 {
@@ -1848,23 +1157,28 @@ int32_t AsyncMongoClient::nextRequestId()
 AsyncMongoClient::AsyncMongoClient(IOScheduler* scheduler,
                                    AsyncMongoConfig config,
                                    std::shared_ptr<MongoBufferProvider> buffer_provider)
-    : m_ring_buffer(config.buffer_size > 0 ? config.buffer_size : galay::kernel::RingBuffer::kDefaultCapacity,
+    : m_config(std::move(config))
+    , m_ring_buffer(m_config.buffer_size > 0 ? m_config.buffer_size
+                                             : galay::kernel::RingBuffer::kDefaultCapacity,
                     std::move(buffer_provider))
-    , m_pipeline_reserve_per_command(std::max<size_t>(32, config.pipeline_reserve_per_command))
+    , m_pipeline_reserve_per_command(std::max<size_t>(32, m_config.pipeline_reserve_per_command))
 {
     (void)scheduler;
-    if (config.logger_name.empty()) {
+    if (m_config.logger_name.empty()) {
         m_logger.ensure("MongoClientLogger");
     } else {
-        m_logger.ensure(config.logger_name);
+        m_logger.ensure(m_config.logger_name);
     }
 }
 
 AsyncMongoClient::AsyncMongoClient(AsyncMongoClient&& other) noexcept
     : m_is_closed(other.m_is_closed)
+    , m_config(std::move(other.m_config))
     , m_socket(std::move(other.m_socket))
     , m_ring_buffer(std::move(other.m_ring_buffer))
     , m_decode_scratch(std::move(other.m_decode_scratch))
+    , m_ping_template_db(std::move(other.m_ping_template_db))
+    , m_ping_encoded_template(std::move(other.m_ping_encoded_template))
     , m_pipeline_reserve_per_command(other.m_pipeline_reserve_per_command)
     , m_next_request_id(other.m_next_request_id)
     , m_logger(std::move(other.m_logger))
@@ -1880,9 +1194,12 @@ AsyncMongoClient& AsyncMongoClient::operator=(AsyncMongoClient&& other) noexcept
             m_socket.close();
         }
         m_is_closed = other.m_is_closed;
+        m_config = std::move(other.m_config);
         m_socket = std::move(other.m_socket);
         m_ring_buffer = std::move(other.m_ring_buffer);
         m_decode_scratch = std::move(other.m_decode_scratch);
+        m_ping_template_db = std::move(other.m_ping_template_db);
+        m_ping_encoded_template = std::move(other.m_ping_encoded_template);
         m_pipeline_reserve_per_command = other.m_pipeline_reserve_per_command;
         m_next_request_id = other.m_next_request_id;
         m_logger = std::move(other.m_logger);
@@ -1893,7 +1210,7 @@ AsyncMongoClient& AsyncMongoClient::operator=(AsyncMongoClient&& other) noexcept
 
 MongoConnectAwaitable AsyncMongoClient::connect(MongoConfig config)
 {
-    return MongoConnectAwaitable(*this, std::move(config));
+    return AsyncMongoClientInternals::connect(*this, std::move(config));
 }
 
 MongoConnectAwaitable AsyncMongoClient::connect(std::string_view host,
@@ -1909,26 +1226,20 @@ MongoConnectAwaitable AsyncMongoClient::connect(std::string_view host,
 
 MongoCommandAwaitable AsyncMongoClient::command(std::string database, MongoDocument command)
 {
-    MongoCommandAwaitable awaitable(*this);
-    if (awaitable.isInvalid()) {
-        awaitable.arm(std::move(database), std::move(command));
-    }
-    return awaitable;
+    return AsyncMongoClientInternals::command(*this, std::move(database), std::move(command));
 }
 
 MongoCommandAwaitable AsyncMongoClient::ping(std::string database)
 {
-    MongoCommandAwaitable awaitable(*this);
-    if (awaitable.isInvalid()) {
-        awaitable.armPing(std::move(database));
-    }
-    return awaitable;
+    MongoDocument ping_doc;
+    ping_doc.append("ping", int32_t(1));
+    return command(std::move(database), std::move(ping_doc));
 }
 
 MongoPipelineAwaitable AsyncMongoClient::pipeline(std::string database,
                                                   std::span<const MongoDocument> commands)
 {
-    return MongoPipelineAwaitable(*this, std::move(database), commands);
+    return AsyncMongoClientInternals::pipeline(*this, std::move(database), commands);
 }
 
 } // namespace galay::mongo

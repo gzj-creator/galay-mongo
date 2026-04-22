@@ -36,9 +36,9 @@ void setFailure(AsyncAuthState* state, std::string message)
     state->done.store(true, std::memory_order_release);
 }
 
-Coroutine runAsyncAuth(IOScheduler* scheduler,
-                       AsyncAuthState* state,
-                       AsyncClientConfig cfg)
+Task<void> runAsyncAuth(IOScheduler* scheduler,
+                        AsyncAuthState* state,
+                        AsyncClientConfig cfg)
 {
     auto client = AsyncMongoClientBuilder().scheduler(scheduler).config(cfg.async).build();
 
@@ -110,9 +110,14 @@ int main()
     }
 
     AsyncAuthState state;
-    scheduler->spawn(runAsyncAuth(scheduler,
-                                  &state,
-                                  AsyncClientConfig{cfg, mongo_test::loadAsyncMongoTestConfig()}));
+    if (!scheduleTask(scheduler,
+                      runAsyncAuth(scheduler,
+                                   &state,
+                                   AsyncClientConfig{cfg, mongo_test::loadAsyncMongoTestConfig()}))) {
+        std::cerr << "FAIL: failed to schedule async auth task" << std::endl;
+        runtime.stop();
+        return 1;
+    }
 
     using namespace std::chrono_literals;
     const auto deadline = std::chrono::steady_clock::now() + 15s;

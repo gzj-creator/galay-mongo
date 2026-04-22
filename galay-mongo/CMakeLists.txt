@@ -1,6 +1,6 @@
-find_package(galay-kernel REQUIRED)
+find_package(galay-kernel CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
-find_package(spdlog REQUIRED)
+find_package(spdlog CONFIG REQUIRED)
 find_path(SPDLOG_INCLUDE_DIR spdlog/spdlog.h REQUIRED)
 
 include_directories(${OPENSSL_INCLUDE_DIR})
@@ -115,13 +115,20 @@ install(EXPORT galay-mongo-targets
 )
 
 include(CMakePackageConfigHelpers)
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/galay-mongo-config-version.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
 configure_package_config_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/GalayMongoConfig.cmake.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/GalayMongoConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/galay-mongo-config.cmake"
     INSTALL_DESTINATION lib/cmake/galay-mongo
 )
 
 install(FILES
-    "${CMAKE_CURRENT_BINARY_DIR}/GalayMongoConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/galay-mongo-config.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/galay-mongo-config-version.cmake"
     DESTINATION lib/cmake/galay-mongo
 )

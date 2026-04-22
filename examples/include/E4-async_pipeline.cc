@@ -25,9 +25,9 @@ struct AsyncClientConfig
     AsyncMongoConfig async;
 };
 
-Coroutine run(IOScheduler* scheduler,
-              RunState* state,
-              AsyncClientConfig cfg)
+Task<void> run(IOScheduler* scheduler,
+               RunState* state,
+               AsyncClientConfig cfg)
 {
     auto client = AsyncMongoClientBuilder().scheduler(scheduler).config(cfg.async).build();
 
@@ -95,7 +95,11 @@ int main()
     }
 
     RunState state;
-    scheduler->spawn(run(scheduler, &state, AsyncClientConfig{mongo_cfg, async_cfg}));
+    if (!scheduleTask(scheduler, run(scheduler, &state, AsyncClientConfig{mongo_cfg, async_cfg}))) {
+        std::cerr << "Failed to schedule async pipeline task" << std::endl;
+        runtime.stop();
+        return 1;
+    }
 
     using namespace std::chrono_literals;
     const auto deadline = std::chrono::steady_clock::now() + 10s;
