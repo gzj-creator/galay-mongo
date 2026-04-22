@@ -9,7 +9,12 @@
 
 ## [Unreleased]
 
-- 暂无未发版变更。
+## [v1.1.2] - 2026-04-23
+
+### Changed
+
+- 将源码仓库中的包配置模板重命名为统一的小写 kebab-case `galay-mongo-config.cmake.in`，收敛 `galay-*` 子项目之间的文件命名风格。
+- 同步更新 `configure_package_config_file(...)` 的模板路径，继续输出兼容现有消费者的 `galay-mongo-config.cmake` 与版本文件。
 
 ## [v1.1.1] - 2026-04-22
 

@@ -122,7 +122,7 @@ write_basic_package_version_file(
 )
 
 configure_package_config_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/GalayMongoConfig.cmake.in"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../cmake/galay-mongo-config.cmake.in"
     "${CMAKE_CURRENT_BINARY_DIR}/galay-mongo-config.cmake"
     INSTALL_DESTINATION lib/cmake/galay-mongo
 )
