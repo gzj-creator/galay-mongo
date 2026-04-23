@@ -9,6 +9,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- 将安装导出的 CMake targets 文件从 `GalayMongoTargets.cmake` 收敛为 `galay-mongo-targets.cmake`，与现有小写 config 文件保持一致。
+
 ## [v1.1.2] - 2026-04-23
 
 ### Changed
