@@ -4,17 +4,17 @@
 
 - 命名空间：`galay::mongo`
 - 常用 include：
-  - `galay-mongo/base/MongoConfig.h`
-  - `galay-mongo/base/MongoError.h`
-  - `galay-mongo/base/MongoValue.h`
-  - `galay-mongo/sync/MongoClient.h`
-  - `galay-mongo/async/AsyncMongoClient.h`
+  - `galay-mongo/base/mongo_config.h`
+  - `galay-mongo/base/mongo_error.h`
+  - `galay-mongo/base/mongo_value.h`
+  - `galay-mongo/sync/mongo_client.h`
+  - `galay-mongo/async/client.h`
 
 ## 2. 基础类型
 
 ### 2.1 MongoConfig
 
-路径：`galay-mongo/base/MongoConfig.h`
+路径：`galay-mongo/base/mongo_config.h`
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
@@ -38,7 +38,7 @@
 
 ### 2.2 MongoError / MongoErrorType
 
-路径：`galay-mongo/base/MongoError.h`
+路径：`galay-mongo/base/mongo_error.h`
 
 常见错误类型：
 
@@ -60,7 +60,7 @@
 
 ### 2.3 MongoValue / MongoDocument / MongoArray / MongoReply
 
-路径：`galay-mongo/base/MongoValue.h`
+路径：`galay-mongo/base/mongo_value.h`
 
 - `MongoValue`：统一值类型容器。
 - `MongoDocument`：键值文档，支持 `append/set/find/at/getXxx`。
@@ -69,7 +69,7 @@
 
 ## 3. 同步 API（MongoClient）
 
-路径：`galay-mongo/sync/MongoClient.h`
+路径：`galay-mongo/sync/mongo_client.h`
 
 返回类型：
 
@@ -104,7 +104,7 @@
 
 ## 4. 异步 API（AsyncMongoClient）
 
-路径：`galay-mongo/async/AsyncMongoClient.h`
+路径：`galay-mongo/async/client.h`
 
 ### 4.1 构造
 
@@ -152,7 +152,7 @@
 
 ### 4.5 AsyncMongoConfig
 
-路径：`galay-mongo/async/AsyncMongoConfig.h`
+路径：`galay-mongo/async/config.h`
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
@@ -174,7 +174,7 @@
 ### 5.1 Sync
 
 ```cpp
-#include "galay-mongo/sync/MongoClient.h"
+#include "galay-mongo/sync/mongo_client.h"
 using namespace galay::mongo;
 
 MongoClient s;
@@ -195,7 +195,7 @@ auto rsp = s.command("admin", ping);
 ### 5.2 Async
 
 ```cpp
-#include "galay-mongo/async/AsyncMongoClient.h"
+#include "galay-mongo/async/client.h"
 
 Coroutine run(galay::kernel::IOScheduler* sched) {
     galay::mongo::AsyncMongoClient client(sched);
@@ -218,7 +218,7 @@ Coroutine run(galay::kernel::IOScheduler* sched) {
 ### 5.3 Async Pipeline（单连接多 in-flight）
 
 ```cpp
-#include "galay-mongo/async/AsyncMongoClient.h"
+#include "galay-mongo/async/client.h"
 
 Coroutine run(galay::kernel::IOScheduler* sched) {
     galay::mongo::AsyncMongoClient client(sched);

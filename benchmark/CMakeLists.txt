@@ -5,5 +5,5 @@ function(add_mongo_benchmark target_name source_file)
     galay_mongo_apply_cxx(${target_name})
 endfunction()
 
-add_mongo_benchmark(B1-SyncPingBench B1-sync_ping_bench.cc)
-add_mongo_benchmark(B2-AsyncPingBench B2-async_ping_bench.cc)
+add_mongo_benchmark(b1_ping b1_ping.cc)
+add_mongo_benchmark(b2_ping b2_ping.cc)

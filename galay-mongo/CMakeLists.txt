@@ -62,7 +62,7 @@ if(GALAY_MONGO_IMPORT_COMPILATION_ENABLED AND CMAKE_VERSION VERSION_GREATER_EQUA
     target_sources(${PROJECT_NAME}-modules
         PUBLIC
             FILE_SET CXX_MODULES
-            FILES ${CMAKE_CURRENT_SOURCE_DIR}/module/galay.mongo.cppm
+            FILES ${CMAKE_CURRENT_SOURCE_DIR}/module/galay_mongo.cppm
     )
     if(GALAY_MONGO_IMPORT_COMPILE_OPTIONS)
         target_compile_options(${PROJECT_NAME}-modules PUBLIC ${GALAY_MONGO_IMPORT_COMPILE_OPTIONS})

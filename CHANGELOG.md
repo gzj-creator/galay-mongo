@@ -1,17 +1,19 @@
-# Changelog
+# CHANGELOG
 
-本文件记录 `galay-mongo` 的发布变化。
-
-- 版本号遵循语义化版本：大改动升主版本，新功能升次版本，修复与兼容性调整升修订版本。
-- 每次提交前先更新本文件；未发版内容先写入 `## [Unreleased]`。
-- 已发版内容使用 `## [vX.Y.Z] - YYYY-MM-DD` 标题，并按主线归纳关键变化。
-- 仅记录对使用者有意义的代码、配置、兼容性与文档变化，不罗列完整 diff。
+维护说明：
+- 未打 tag 的改动先写入 `
 
 ## [Unreleased]
 
-### Changed
+## [v2.0.0] - 2026-04-29
 
-- 将安装导出的 CMake targets 文件从 `GalayMongoTargets.cmake` 收敛为 `galay-mongo-targets.cmake`，与现有小写 config 文件保持一致。
+### Changed
+- 统一源码、头文件、测试、示例与 benchmark 文件命名为 `lower_snake_case`，编号前缀同步使用 `t<number>_`、`e<number>_` 与 `b<number>_` 风格。
+- 同步更新构建脚本、模块入口、示例、测试、文档与脚本中的文件路径引用。
+- 将项目内头文件包含调整为基于公开 include 根或模块根的非相对路径。
+
+### Release
+- 按大版本发布要求提升版本到 `v2.0.0`。
 
 ## [v1.1.2] - 2026-04-23
 
@@ -40,7 +42,7 @@
 
 ### Added
 
-- 新增协议构建辅助能力与 `T8-protocol_builder` 测试。
+- 新增协议构建辅助能力与 `t8_builder` 测试。
 - 新增 `MongoBufferProvider`，补充异步处理链路支撑。
 
 ### Changed
@@ -52,4 +54,4 @@
 
 ### Fixed
 
-- 在 `SocketOptions.h` 中补充 `netinet/in.h` 头文件，修复 `IPPROTO_TCP` 在部分环境下未定义的问题。
+- 在 `socket_options.h` 中补充 `netinet/in.h` 头文件，修复 `IPPROTO_TCP` 在部分环境下未定义的问题。

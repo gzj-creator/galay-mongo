@@ -80,7 +80,7 @@ cmake --build build --parallel
 ## 快速示例（同步）
 
 ```cpp
-#include "galay-mongo/sync/MongoClient.h"
+#include "galay-mongo/sync/mongo_client.h"
 using namespace galay::mongo;
 
 int main() {
@@ -114,17 +114,17 @@ cmake -S . -B build -DGALAY_MONGO_BUILD_TESTS=ON
 cmake --build build --parallel
 
 # 协议单测
-./build/test/T1-BsonProtocol
+./build/test/t1_bson
 
 # 需要本地可访问 MongoDB
-./build/test/T2-SyncMongoClient
-./build/test/T3-AsyncMongoPipeline
-./build/test/T4-SyncMongoFunctional
-./build/test/T5-AsyncMongoFunctional
-./build/test/T7-SyncLargeMessageBridge
+./build/test/t2_client
+./build/test/t3_pipeline
+./build/test/t4_func
+./build/test/t5_func
+./build/test/t7_bridge
 
 # 可选：仅在设置用户名/密码时执行（否则自动 skip）
-./build/test/T6-AuthCompatibility
+./build/test/t6_auth
 ```
 
 可选环境变量：
@@ -156,29 +156,29 @@ cmake --build build --parallel
 常用 include 示例：
 
 ```bash
-./build/examples/E1-SyncPing-Include
-./build/examples/E2-AsyncPing-Include
-./build/examples/E3-SyncCrud-Include
-./build/examples/E4-AsyncPipeline-Include
-./build/examples/E5-AsyncCommandCrud-Include
+./build/examples/e1_ping_include
+./build/examples/e2_ping_include
+./build/examples/e3_crud_include
+./build/examples/e4_pipeline_include
+./build/examples/e5_command_include
 ```
 
 模块 import 示例（仅在 `GALAY_MONGO_BUILD_MODULE_EXAMPLES_EFFECTIVE=ON` 时生成）：
 
 ```bash
-./build/examples/E1-SyncPing-Import
-./build/examples/E2-AsyncPing-Import
-./build/examples/E3-SyncCrud-Import
-./build/examples/E4-AsyncPipeline-Import
-./build/examples/E5-AsyncCommandCrud-Import
+./build/examples/e1_ping_import
+./build/examples/e2_ping_import
+./build/examples/e3_crud_import
+./build/examples/e4_pipeline_import
+./build/examples/e5_command_import
 ```
 
 ## Benchmark
 
 项目提供 `benchmark/` 目录与两个压测程序：
 
-- `B1-SyncPingBench`（同步会话 + 多线程）
-- `B2-AsyncPingBench`（异步客户端 + 协程并发）
+- `b1_ping`（同步会话 + 多线程）
+- `b2_ping`（异步客户端 + 协程并发）
 
 构建：
 
@@ -194,9 +194,9 @@ cmake --build build --parallel
 示例：
 
 ```bash
-./build/benchmark/B1-SyncPingBench 20000 100 140.143.142.251 27017 admin
-./build/benchmark/B2-AsyncPingBench 20000 100 140.143.142.251 27017 admin
-./build/benchmark/B2-AsyncPingBench 20000 100 140.143.142.251 27017 admin --fanout=2
+./build/benchmark/b1_ping 20000 100 140.143.142.251 27017 admin
+./build/benchmark/b2_ping 20000 100 140.143.142.251 27017 admin
+./build/benchmark/b2_ping 20000 100 140.143.142.251 27017 admin --fanout=2
 ```
 
 也可用环境变量：
@@ -209,12 +209,12 @@ cmake --build build --parallel
 - `GALAY_MONGO_AUTH_DB`
 - `GALAY_MONGO_BENCH_TOTAL`
 - `GALAY_MONGO_BENCH_CONCURRENCY`
-- `GALAY_MONGO_BENCH_ASYNC_FANOUT`（仅 `B2`，默认 `1`）
+- `GALAY_MONGO_BENCH_ASYNC_FANOUT`（仅 `b2`，默认 `1`）
 
 ## 模块接口
 
-- `galay-mongo/module/galay.mongo.cppm`
-- `galay-mongo/module/ModulePrelude.hpp`
+- `galay-mongo/module/galay_mongo.cppm`
+- `galay-mongo/module/module_prelude.hpp`
 
 支持模块的编译器可使用：
 
