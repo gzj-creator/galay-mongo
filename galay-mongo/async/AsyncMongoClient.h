@@ -4,15 +4,20 @@
 #include <galay-kernel/async/TcpSocket.h>
 #include <galay-kernel/common/Error.h>
 #include <galay-kernel/common/Host.hpp>
+#include <galay-kernel/kernel/Awaitable.h>
 #include <galay-kernel/kernel/IOScheduler.hpp>
 #include <galay-kernel/kernel/Task.h>
 
+#include <array>
+#include <chrono>
+#include <coroutine>
 #include <expected>
 #include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <sys/uio.h>
 #include <utility>
 #include <vector>
 
@@ -47,18 +52,6 @@ public:
     AsyncMongoClientBuilder& config(AsyncMongoConfig config)
     {
         m_config = std::move(config);
-        return *this;
-    }
-
-    AsyncMongoClientBuilder& sendTimeout(std::chrono::milliseconds timeout)
-    {
-        m_config.send_timeout = timeout;
-        return *this;
-    }
-
-    AsyncMongoClientBuilder& recvTimeout(std::chrono::milliseconds timeout)
-    {
-        m_config.recv_timeout = timeout;
         return *this;
     }
 
@@ -108,10 +101,206 @@ struct MongoPipelineResponse
     bool ok() const { return reply.has_value(); }
 };
 
-using MongoConnectAwaitable = Task<std::expected<bool, MongoError>>;
-using MongoCommandAwaitable = Task<std::expected<MongoReply, MongoError>>;
-using MongoPipelineAwaitable =
-    Task<std::expected<std::vector<MongoPipelineResponse>, MongoError>>;
+class MongoConnectAwaitable
+{
+public:
+    using Result = std::expected<bool, MongoError>;
+
+    MongoConnectAwaitable(AsyncMongoClient& client, MongoConfig config);
+    MongoConnectAwaitable(MongoConnectAwaitable&&) noexcept = default;
+    MongoConnectAwaitable& operator=(MongoConnectAwaitable&&) noexcept = default;
+    MongoConnectAwaitable(const MongoConnectAwaitable&) = delete;
+    MongoConnectAwaitable& operator=(const MongoConnectAwaitable&) = delete;
+
+    bool await_ready() { return m_inner.await_ready(); }
+    template <typename Promise>
+    bool await_suspend(std::coroutine_handle<Promise> handle)
+    {
+        return m_inner.await_suspend(handle);
+    }
+    Result await_resume() { return m_inner.await_resume(); }
+
+    auto timeout(std::chrono::milliseconds timeout) &&
+    {
+        return std::move(m_inner).timeout(timeout);
+    }
+
+    auto timeout(std::chrono::milliseconds timeout) &
+    {
+        return m_inner.timeout(timeout);
+    }
+
+    bool isInvalid() const;
+
+private:
+    enum class Phase {
+        Invalid,
+        Connect,
+        SendRequest,
+        RecvReply,
+        HandleReply,
+        Done
+    };
+
+    struct SharedState;
+    struct Machine {
+        using result_type = Result;
+        static constexpr galay::kernel::SequenceOwnerDomain kSequenceOwnerDomain =
+            galay::kernel::SequenceOwnerDomain::ReadWrite;
+
+        explicit Machine(std::shared_ptr<SharedState> state);
+
+        galay::kernel::MachineAction<result_type> advance();
+        void onConnect(std::expected<void, galay::kernel::IOError> result);
+        void onRead(std::expected<size_t, galay::kernel::IOError> result);
+        void onWrite(std::expected<size_t, galay::kernel::IOError> result);
+
+    private:
+        galay::kernel::MachineAction<result_type> advanceSendRequest();
+        galay::kernel::MachineAction<result_type> advanceRecvReply();
+        galay::kernel::MachineAction<result_type> advanceHandleReply();
+
+        std::shared_ptr<SharedState> m_state;
+    };
+    using InnerAwaitable = galay::kernel::StateMachineAwaitable<Machine>;
+
+    std::shared_ptr<SharedState> m_state;
+    InnerAwaitable m_inner;
+};
+
+class MongoCommandAwaitable
+{
+public:
+    using Result = std::expected<MongoReply, MongoError>;
+
+    MongoCommandAwaitable(AsyncMongoClient& client,
+                          std::string database,
+                          MongoDocument command);
+    MongoCommandAwaitable(MongoCommandAwaitable&&) noexcept = default;
+    MongoCommandAwaitable& operator=(MongoCommandAwaitable&&) noexcept = default;
+    MongoCommandAwaitable(const MongoCommandAwaitable&) = delete;
+    MongoCommandAwaitable& operator=(const MongoCommandAwaitable&) = delete;
+
+    bool await_ready() { return m_inner.await_ready(); }
+    template <typename Promise>
+    bool await_suspend(std::coroutine_handle<Promise> handle)
+    {
+        return m_inner.await_suspend(handle);
+    }
+    Result await_resume() { return m_inner.await_resume(); }
+
+    auto timeout(std::chrono::milliseconds timeout) &&
+    {
+        return std::move(m_inner).timeout(timeout);
+    }
+
+    auto timeout(std::chrono::milliseconds timeout) &
+    {
+        return m_inner.timeout(timeout);
+    }
+
+    bool isInvalid() const;
+
+private:
+    enum class Phase {
+        Invalid,
+        SendCommand,
+        RecvReply,
+        Done
+    };
+
+    struct SharedState;
+    struct Machine {
+        using result_type = Result;
+        static constexpr galay::kernel::SequenceOwnerDomain kSequenceOwnerDomain =
+            galay::kernel::SequenceOwnerDomain::ReadWrite;
+
+        explicit Machine(std::shared_ptr<SharedState> state);
+
+        galay::kernel::MachineAction<result_type> advance();
+        void onRead(std::expected<size_t, galay::kernel::IOError> result);
+        void onWrite(std::expected<size_t, galay::kernel::IOError> result);
+
+    private:
+        galay::kernel::MachineAction<result_type> advanceSendCommand();
+        galay::kernel::MachineAction<result_type> advanceRecvReply();
+        void finishWithMessage(protocol::MongoMessage message);
+        void setError(MongoError error) noexcept;
+
+        std::shared_ptr<SharedState> m_state;
+    };
+    using InnerAwaitable = galay::kernel::StateMachineAwaitable<Machine>;
+
+    std::shared_ptr<SharedState> m_state;
+    InnerAwaitable m_inner;
+};
+
+class MongoPipelineAwaitable
+{
+public:
+    using Result = std::expected<std::vector<MongoPipelineResponse>, MongoError>;
+
+    MongoPipelineAwaitable(AsyncMongoClient& client,
+                           std::string database,
+                           std::span<const MongoDocument> commands);
+    MongoPipelineAwaitable(MongoPipelineAwaitable&&) noexcept = default;
+    MongoPipelineAwaitable& operator=(MongoPipelineAwaitable&&) noexcept = default;
+    MongoPipelineAwaitable(const MongoPipelineAwaitable&) = delete;
+    MongoPipelineAwaitable& operator=(const MongoPipelineAwaitable&) = delete;
+
+    bool await_ready() { return m_inner.await_ready(); }
+    template <typename Promise>
+    bool await_suspend(std::coroutine_handle<Promise> handle)
+    {
+        return m_inner.await_suspend(handle);
+    }
+    Result await_resume() { return m_inner.await_resume(); }
+
+    auto timeout(std::chrono::milliseconds timeout) &&
+    {
+        return std::move(m_inner).timeout(timeout);
+    }
+
+    auto timeout(std::chrono::milliseconds timeout) &
+    {
+        return m_inner.timeout(timeout);
+    }
+
+    bool isInvalid() const;
+
+private:
+    enum class Phase {
+        Invalid,
+        SendCommands,
+        RecvReplies,
+        Done
+    };
+
+    struct SharedState;
+    struct Machine {
+        using result_type = Result;
+        static constexpr galay::kernel::SequenceOwnerDomain kSequenceOwnerDomain =
+            galay::kernel::SequenceOwnerDomain::ReadWrite;
+
+        explicit Machine(std::shared_ptr<SharedState> state);
+
+        galay::kernel::MachineAction<result_type> advance();
+        void onRead(std::expected<size_t, galay::kernel::IOError> result);
+        void onWrite(std::expected<size_t, galay::kernel::IOError> result);
+
+    private:
+        galay::kernel::MachineAction<result_type> advanceSendCommands();
+        galay::kernel::MachineAction<result_type> advanceRecvReplies();
+        bool storeResponse(protocol::MongoMessage message);
+        void setError(MongoError error) noexcept;
+
+        std::shared_ptr<SharedState> m_state;
+    };
+    using InnerAwaitable = galay::kernel::StateMachineAwaitable<Machine>;
+
+    std::shared_ptr<SharedState> m_state;
+    InnerAwaitable m_inner;
+};
 
 class AsyncMongoClient
 {
@@ -161,6 +350,8 @@ public:
 
 private:
     friend struct AsyncMongoClientInternals;
+    friend class MongoCommandAwaitable;
+    friend class MongoPipelineAwaitable;
 
     int32_t reserveRequestIdBlock(size_t count);
 

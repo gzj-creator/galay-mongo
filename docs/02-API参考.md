@@ -156,18 +156,15 @@
 
 | 字段 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
-| `send_timeout` | `std::chrono::milliseconds` | `-1ms` | `<0` 表示不启用 |
-| `recv_timeout` | `std::chrono::milliseconds` | `-1ms` | `<0` 表示不启用 |
 | `buffer_size` | `size_t` | `16384` | 环形缓冲区大小 |
 | `pipeline_reserve_per_command` | `size_t` | `96` | pipeline 每条命令的编码预留字节估算 |
 | `logger_name` | `std::string` | `MongoClientLogger` | 默认 logger 名称 |
 
 方法：
 
-- `isSendTimeoutEnabled()`
-- `isRecvTimeoutEnabled()`
-- `withTimeout(send, recv)`
 - `noTimeout()`
+
+说明：异步操作 timeout 不再放在 `AsyncMongoConfig` 中配置，而是直接对公开 awaitable 在调用点附加 `.timeout(std::chrono::milliseconds)`，该 timeout 覆盖整个 `connect` / `command` / `ping` / `pipeline` 逻辑操作。
 
 ## 5. 典型调用片段
 

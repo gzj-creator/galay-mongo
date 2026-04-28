@@ -9,9 +9,21 @@
 
 ## [Unreleased]
 
+## [v1.2.0] - 2026-04-27
+
+### Added
+
+- 为 `AsyncMongoClient` 的公开 awaitable（`connect` / `command` / `ping` / `pipeline`）补齐调用点 `.timeout(...)` 能力，统一异步 Mongo API 与 `galay-http` 的 whole-operation timeout 用法。
+
 ### Changed
 
-- 将安装导出的 CMake targets 文件从 `GalayMongoTargets.cmake` 收敛为 `galay-mongo-targets.cmake`，与现有小写 config 文件保持一致。
+- 将 Mongo 异步客户端整体重构为状态机 awaitable 风格，补齐 `connect` 与 pipeline/command 路径的一致状态机实现，统一与 `galay-http` 的异步交互模型。
+- 移除 `AsyncMongoConfig` 中旧的 send/recv split timeout 配置，改为由调用方在单次操作上显式附着 whole timeout，并同步更新 builder、测试配置与示例配置模型。
+- 同步迁移 include/import 两套异步示例与 `T3` / `T5` / `T6` 测试，全部改用单次操作 timeout 入口，避免重复 await 带来的重复执行副作用。
+
+### Fixed
+
+- 修正 whole-timeout 迁移过程中的 pipeline/CRUD 错误处理细节，保证超时与服务端错误继续统一映射为 Mongo 侧错误结果，并通过真实 Mongo 实例验证成功路径与超时路径行为。
 
 ## [v1.1.2] - 2026-04-23
 

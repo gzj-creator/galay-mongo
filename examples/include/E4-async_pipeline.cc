@@ -23,6 +23,7 @@ struct AsyncClientConfig
 {
     MongoConfig mongo;
     AsyncMongoConfig async;
+    mongo_example::AsyncMongoOperationTimeout timeout;
 };
 
 Task<void> run(IOScheduler* scheduler,
@@ -31,7 +32,12 @@ Task<void> run(IOScheduler* scheduler,
 {
     auto client = AsyncMongoClientBuilder().scheduler(scheduler).config(cfg.async).build();
 
-    const std::expected<bool, MongoError> conn_result = co_await client.connect(cfg.mongo);
+    std::expected<bool, MongoError> conn_result;
+    if (cfg.timeout.enabled) {
+        conn_result = co_await client.connect(cfg.mongo).timeout(cfg.timeout.value);
+    } else {
+        conn_result = co_await client.connect(cfg.mongo);
+    }
     if (!conn_result) {
         state->ok.store(false, std::memory_order_relaxed);
         state->error = "connect failed: " + conn_result.error().message();
@@ -54,8 +60,12 @@ Task<void> run(IOScheduler* scheduler,
     c3.append("ping", int32_t(1));
     commands.push_back(std::move(c3));
 
-    const std::expected<std::vector<MongoPipelineResponse>, MongoError> pipeline_result =
-        co_await client.pipeline(cfg.mongo.database, std::move(commands));
+    std::expected<std::vector<MongoPipelineResponse>, MongoError> pipeline_result;
+    if (cfg.timeout.enabled) {
+        pipeline_result = co_await client.pipeline(cfg.mongo.database, commands).timeout(cfg.timeout.value);
+    } else {
+        pipeline_result = co_await client.pipeline(cfg.mongo.database, commands);
+    }
     if (!pipeline_result) {
         state->ok.store(false, std::memory_order_relaxed);
         state->error = "pipeline failed: " + pipeline_result.error().message();
@@ -66,10 +76,16 @@ Task<void> run(IOScheduler* scheduler,
     for (const auto& item : *pipeline_result) {
         if (item.ok()) {
             std::cout << "requestId=" << item.request_id << " ok" << std::endl;
-        } else {
+        } else if (item.error.has_value()) {
             state->ok.store(false, std::memory_order_relaxed);
             state->error = "requestId=" + std::to_string(item.request_id) +
                            " error=" + item.error->message();
+            state->done.store(true, std::memory_order_release);
+            co_return;
+        } else {
+            state->ok.store(false, std::memory_order_relaxed);
+            state->error = "requestId=" + std::to_string(item.request_id) +
+                           " has neither reply nor error";
             state->done.store(true, std::memory_order_release);
             co_return;
         }
@@ -83,6 +99,7 @@ int main()
 {
     const auto mongo_cfg = mongo_example::loadMongoConfigFromEnv();
     const auto async_cfg = mongo_example::loadAsyncMongoConfigFromEnv();
+    const auto timeout_cfg = mongo_example::loadAsyncMongoOperationTimeoutFromEnv();
 
     Runtime runtime;
     runtime.start();
@@ -95,7 +112,7 @@ int main()
     }
 
     RunState state;
-    if (!scheduleTask(scheduler, run(scheduler, &state, AsyncClientConfig{mongo_cfg, async_cfg}))) {
+    if (!scheduleTask(scheduler, run(scheduler, &state, AsyncClientConfig{mongo_cfg, async_cfg, timeout_cfg}))) {
         std::cerr << "Failed to schedule async pipeline task" << std::endl;
         runtime.stop();
         return 1;

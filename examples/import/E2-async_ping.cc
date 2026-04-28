@@ -23,6 +23,7 @@ struct AsyncClientConfig
 {
     MongoConfig mongo;
     AsyncMongoConfig async;
+    mongo_example::AsyncMongoOperationTimeout timeout;
 };
 
 Task<void> run(IOScheduler* scheduler,
@@ -31,7 +32,12 @@ Task<void> run(IOScheduler* scheduler,
 {
     auto client = AsyncMongoClientBuilder().scheduler(scheduler).config(cfg.async).build();
 
-    const std::expected<bool, MongoError> conn_result = co_await client.connect(cfg.mongo);
+    std::expected<bool, MongoError> conn_result;
+    if (cfg.timeout.enabled) {
+        conn_result = co_await client.connect(cfg.mongo).timeout(cfg.timeout.value);
+    } else {
+        conn_result = co_await client.connect(cfg.mongo);
+    }
     if (!conn_result) {
         state->ok.store(false, std::memory_order_relaxed);
         state->error = conn_result.error().message();
@@ -39,7 +45,12 @@ Task<void> run(IOScheduler* scheduler,
         co_return;
     }
 
-    const std::expected<MongoReply, MongoError> ping_result = co_await client.ping(cfg.mongo.database);
+    std::expected<MongoReply, MongoError> ping_result;
+    if (cfg.timeout.enabled) {
+        ping_result = co_await client.ping(cfg.mongo.database).timeout(cfg.timeout.value);
+    } else {
+        ping_result = co_await client.ping(cfg.mongo.database);
+    }
     if (!ping_result) {
         state->ok.store(false, std::memory_order_relaxed);
         state->error = ping_result.error().message();
@@ -55,6 +66,7 @@ int main()
 {
     const auto mongo_cfg = mongo_example::loadMongoConfigFromEnv();
     const auto async_cfg = mongo_example::loadAsyncMongoConfigFromEnv();
+    const auto timeout_cfg = mongo_example::loadAsyncMongoOperationTimeoutFromEnv();
 
     Runtime runtime;
     runtime.start();
@@ -67,7 +79,7 @@ int main()
     }
 
     RunState state;
-    if (!scheduleTask(scheduler, run(scheduler, &state, AsyncClientConfig{mongo_cfg, async_cfg}))) {
+    if (!scheduleTask(scheduler, run(scheduler, &state, AsyncClientConfig{mongo_cfg, async_cfg, timeout_cfg}))) {
         std::cerr << "Failed to schedule async ping task" << std::endl;
         runtime.stop();
         return 1;

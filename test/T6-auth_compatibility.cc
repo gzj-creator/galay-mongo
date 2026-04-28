@@ -27,6 +27,7 @@ struct AsyncClientConfig
 {
     MongoConfig mongo;
     AsyncMongoConfig async;
+    mongo_test::AsyncMongoOperationTimeout timeout;
 };
 
 void setFailure(AsyncAuthState* state, std::string message)
@@ -42,13 +43,23 @@ Task<void> runAsyncAuth(IOScheduler* scheduler,
 {
     auto client = AsyncMongoClientBuilder().scheduler(scheduler).config(cfg.async).build();
 
-    const std::expected<bool, MongoError> connected = co_await client.connect(cfg.mongo);
+    std::expected<bool, MongoError> connected;
+    if (cfg.timeout.enabled) {
+        connected = co_await client.connect(cfg.mongo).timeout(cfg.timeout.value);
+    } else {
+        connected = co_await client.connect(cfg.mongo);
+    }
     if (!connected) {
         setFailure(state, "async connect failed: " + connected.error().message());
         co_return;
     }
 
-    const std::expected<MongoReply, MongoError> ping = co_await client.ping(cfg.mongo.database);
+    std::expected<MongoReply, MongoError> ping;
+    if (cfg.timeout.enabled) {
+        ping = co_await client.ping(cfg.mongo.database).timeout(cfg.timeout.value);
+    } else {
+        ping = co_await client.ping(cfg.mongo.database);
+    }
     if (!ping) {
         setFailure(state, "async ping failed: " + ping.error().message());
         co_return;
@@ -113,7 +124,9 @@ int main()
     if (!scheduleTask(scheduler,
                       runAsyncAuth(scheduler,
                                    &state,
-                                   AsyncClientConfig{cfg, mongo_test::loadAsyncMongoTestConfig()}))) {
+                                   AsyncClientConfig{cfg,
+                                                     mongo_test::loadAsyncMongoTestConfig(),
+                                                     mongo_test::loadAsyncMongoOperationTimeout()}))) {
         std::cerr << "FAIL: failed to schedule async auth task" << std::endl;
         runtime.stop();
         return 1;

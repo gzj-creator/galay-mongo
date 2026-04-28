@@ -411,6 +411,93 @@ void fillSendIovecsFromSegments(std::vector<struct iovec>& iovecs,
     }
 }
 
+constexpr size_t kMongoMaxWriteIovecs = 3;
+
+size_t totalSegmentLength(std::span<const SendSegment> segments)
+{
+    size_t total = 0;
+    for (const auto& segment : segments) {
+        total += segment.len;
+    }
+    return total;
+}
+
+bool prepareWriteWindow(std::array<struct iovec, kMongoMaxWriteIovecs>& write_iovecs,
+                        size_t& write_iov_count,
+                        std::vector<struct iovec>& scratch,
+                        std::span<const SendSegment> segments,
+                        size_t sent,
+                        std::optional<MongoError>& result_error)
+{
+    fillSendIovecsFromSegments(scratch, segments, sent);
+    if (scratch.empty()) {
+        result_error = MongoError(MONGO_ERROR_INTERNAL,
+                                  "sendSegments produced empty iovecs");
+        write_iov_count = 0;
+        return false;
+    }
+    if (scratch.size() > write_iovecs.size()) {
+        result_error = MongoError(MONGO_ERROR_INTERNAL,
+                                  "Mongo write iovec count exceeds supported window");
+        write_iov_count = 0;
+        return false;
+    }
+
+    write_iov_count = scratch.size();
+    for (size_t i = 0; i < write_iov_count; ++i) {
+        write_iovecs[i] = scratch[i];
+    }
+    return true;
+}
+
+bool prepareReadWindow(AsyncMongoClient& client,
+                       std::array<struct iovec, 2>& read_iovecs,
+                       size_t& read_iov_count,
+                       std::string_view no_space_message,
+                       std::optional<MongoError>& result_error)
+{
+    read_iov_count = client.ringBuffer().getWriteIovecs(read_iovecs.data(), read_iovecs.size());
+    if (read_iov_count == 0) {
+        result_error = MongoError(MONGO_ERROR_RECV, std::string(no_space_message));
+        return false;
+    }
+    return true;
+}
+
+void applyReadResult(AsyncMongoClient& client,
+                     std::expected<size_t, IOError> result,
+                     MongoErrorType io_error_type,
+                     std::string_view closed_message,
+                     std::optional<MongoError>& result_error)
+{
+    if (!result.has_value()) {
+        result_error = mapIoError(result.error(), io_error_type);
+        return;
+    }
+    if (result.value() == 0) {
+        result_error = MongoError(MONGO_ERROR_CONNECTION_CLOSED, std::string(closed_message));
+        return;
+    }
+    client.ringBuffer().produce(result.value());
+}
+
+void applyWriteResult(std::expected<size_t, IOError> result,
+                      size_t& sent,
+                      MongoErrorType io_error_type,
+                      std::string_view closed_message,
+                      std::optional<MongoError>& result_error)
+{
+    if (!result.has_value()) {
+        result_error = mapIoError(result.error(), io_error_type);
+        return;
+    }
+    if (result.value() == 0) {
+        result_error = MongoError(MONGO_ERROR_CONNECTION_CLOSED, std::string(closed_message));
+        return;
+    }
+    sent += result.value();
+}
+
 bool isSimplePingCommand(const MongoDocument& command, const std::string& database)
 {
     if (command.empty() || command.size() > 2) {
@@ -733,43 +820,6 @@ struct AsyncMongoClientInternals
         }
     };
 
-    static Task<std::expected<size_t, IOError>> writevOnce(AsyncMongoClient& client,
-                                                           std::array<struct iovec, 3>& iovecs,
-                                                           size_t count)
-    {
-        auto awaitable = client.m_socket.writev(iovecs, count);
-        if (client.m_config.isSendTimeoutEnabled()) {
-            co_return co_await awaitable.timeout(client.m_config.send_timeout);
-        }
-        co_return co_await awaitable;
-    }
-
-    static Task<std::expected<size_t, IOError>> readvOnce(AsyncMongoClient& client,
-                                                          std::array<struct iovec, 2>& iovecs,
-                                                          size_t count)
-    {
-        auto awaitable = client.m_socket.readv(iovecs, count);
-        if (client.m_config.isRecvTimeoutEnabled()) {
-            co_return co_await awaitable.timeout(client.m_config.recv_timeout);
-        }
-        co_return co_await awaitable;
-    }
-
-    static Task<std::expected<void, MongoError>> connectSocket(AsyncMongoClient& client,
-                                                               const MongoConfig& config)
-    {
-        client.m_socket.option().handleNonBlock();
-
-        galay::kernel::Host host(galay::kernel::IPType::IPV4, config.host, config.port);
-        auto connect_result = co_await client.m_socket.connect(host);
-        if (!connect_result.has_value()) {
-            co_return std::unexpected(mapIoError(connect_result.error(), MONGO_ERROR_CONNECTION));
-        }
-
-        trySetTcpNoDelay(client.m_socket.handle().fd, config.tcp_nodelay);
-        co_return std::expected<void, MongoError>{};
-    }
-
     static std::expected<std::optional<protocol::MongoMessage>, MongoError>
     tryParseMessage(AsyncMongoClient& client)
     {
@@ -800,192 +850,314 @@ struct AsyncMongoClientInternals
         return std::optional<protocol::MongoMessage>(std::move(message.value()));
     }
 
-    static Task<std::expected<protocol::MongoMessage, MongoError>>
-    recvMessage(AsyncMongoClient& client,
-                MongoErrorType io_error_type,
-                std::string_view closed_message,
-                std::string_view no_space_message)
+    static void clearDecodeScratch(AsyncMongoClient& client)
     {
-        while (true) {
-            auto message_or_err = tryParseMessage(client);
-            if (!message_or_err) {
-                co_return std::unexpected(std::move(message_or_err.error()));
-            }
-            if (message_or_err->has_value()) {
-                co_return std::move(message_or_err->value());
-            }
-
-            struct iovec read_iovecs[2];
-            const size_t count = client.m_ring_buffer.getWriteIovecs(read_iovecs, 2);
-            if (count == 0) {
-                co_return std::unexpected(
-                    MongoError(MONGO_ERROR_RECV, std::string(no_space_message)));
-            }
-
-            std::array<struct iovec, 2> borrowed_iovecs{};
-            for (size_t i = 0; i < count; ++i) {
-                borrowed_iovecs[i] = read_iovecs[i];
-            }
-
-            auto read_result = co_await readvOnce(client, borrowed_iovecs, count);
-            if (!read_result.has_value()) {
-                co_return std::unexpected(mapIoError(read_result.error(), io_error_type));
-            }
-            if (read_result.value() == 0) {
-                co_return std::unexpected(
-                    MongoError(MONGO_ERROR_CONNECTION_CLOSED, std::string(closed_message)));
-            }
-            client.m_ring_buffer.produce(read_result.value());
-        }
-    }
-
-    static Task<std::expected<bool, MongoError>> sendSegments(
-        AsyncMongoClient& client,
-        std::span<const SendSegment> segments,
-        MongoErrorType io_error_type,
-        std::string_view closed_message)
-    {
-        size_t total_len = 0;
-        for (const auto& segment : segments) {
-            total_len += segment.len;
-        }
-
-        size_t sent = 0;
-        std::vector<struct iovec> iovecs;
-        iovecs.reserve(segments.size());
-
-        while (sent < total_len) {
-            fillSendIovecsFromSegments(iovecs, segments, sent);
-            if (iovecs.empty()) {
-                co_return std::unexpected(MongoError(MONGO_ERROR_INTERNAL,
-                                                     "sendSegments produced empty iovecs"));
-            }
-
-            std::array<struct iovec, 3> borrowed_iovecs{};
-            for (size_t i = 0; i < iovecs.size(); ++i) {
-                borrowed_iovecs[i] = iovecs[i];
-            }
-
-            auto write_result = co_await writevOnce(client, borrowed_iovecs, iovecs.size());
-            if (!write_result.has_value()) {
-                co_return std::unexpected(mapIoError(write_result.error(), io_error_type));
-            }
-            if (write_result.value() == 0) {
-                co_return std::unexpected(
-                    MongoError(MONGO_ERROR_CONNECTION_CLOSED, std::string(closed_message)));
-            }
-
-            sent += write_result.value();
-        }
-
-        co_return true;
-    }
-
-    static MongoConnectAwaitable connect(AsyncMongoClient& client, MongoConfig config)
-    {
-        client.m_ring_buffer.clear();
         client.m_decode_scratch.clear();
+    }
 
-        ConnectFlowState state(client, std::move(config));
-        auto init_result = state.initialize();
+    static void completeConnectSuccess(AsyncMongoClient& client,
+                                       const ConnectFlowState& state)
+    {
+        client.m_is_closed = false;
+        if (state.auth_enabled) {
+            MongoLogInfo(client.m_logger.get(),
+                         "Mongo connected and authenticated successfully to {}:{}",
+                         state.config.host,
+                         state.config.port);
+        } else {
+            MongoLogInfo(client.m_logger.get(),
+                         "Mongo connected successfully to {}:{}",
+                         state.config.host,
+                         state.config.port);
+        }
+    }
+};
+
+struct MongoConnectAwaitable::SharedState {
+    SharedState(AsyncMongoClient& client_ref, MongoConfig config)
+        : client(&client_ref)
+        , flow(client_ref, std::move(config))
+        , host(galay::kernel::IPType::IPV4, flow.config.host, flow.config.port)
+    {
+        client->ringBuffer().clear();
+        AsyncMongoClientInternals::clearDecodeScratch(*client);
+
+        auto init_result = flow.initialize();
         if (!init_result.has_value()) {
-            co_return std::unexpected(std::move(init_result.error()));
+            pending_error = std::move(init_result.error());
+            phase = Phase::Invalid;
+            return;
         }
 
-        auto connect_result = co_await connectSocket(client, state.config);
-        if (!connect_result.has_value()) {
-            co_return std::unexpected(std::move(connect_result.error()));
+        auto nonblock_result = client->socket().option().handleNonBlock();
+        if (!nonblock_result.has_value()) {
+            pending_error = mapIoError(nonblock_result.error(), MONGO_ERROR_CONNECTION);
+            phase = Phase::Invalid;
+            return;
         }
 
-        while (true) {
-            const std::array<SendSegment, 1> segments{{
-                SendSegment{state.encoded_request.data(), state.encoded_request.size()}
-            }};
-            auto send_result = co_await sendSegments(
-                client,
-                std::span<const SendSegment>(segments),
-                MONGO_ERROR_SEND,
-                "Connection closed during connect/auth request send");
-            if (!send_result.has_value()) {
-                co_return std::unexpected(std::move(send_result.error()));
-            }
+        phase = Phase::Connect;
+    }
 
-            auto message_result = co_await recvMessage(
-                client,
-                MONGO_ERROR_RECV,
-                "Connection closed while receiving connect/auth reply",
-                "No writable ring buffer space while receiving connect/auth reply");
-            if (!message_result.has_value()) {
-                co_return std::unexpected(std::move(message_result.error()));
-            }
+    AsyncMongoClient* client = nullptr;
+    AsyncMongoClientInternals::ConnectFlowState flow;
+    galay::kernel::Host host;
+    Phase phase = Phase::Invalid;
+    size_t sent = 0;
+    std::array<struct iovec, kMongoMaxWriteIovecs> write_iovecs{};
+    size_t write_iov_count = 0;
+    std::vector<struct iovec> send_iovec_scratch;
+    std::array<struct iovec, 2> read_iovecs{};
+    size_t read_iov_count = 0;
+    std::optional<MongoError> pending_error;
+    std::optional<Result> result;
+    std::optional<protocol::MongoMessage> current_message;
+};
 
-            MongoReply reply(std::move(message_result->body));
-            if (!reply.ok()) {
-                co_return std::unexpected(makeServerError(
-                    std::move(reply),
-                    "Mongo connect/auth command failed"));
-            }
+MongoConnectAwaitable::Machine::Machine(std::shared_ptr<SharedState> state)
+    : m_state(std::move(state))
+{
+}
 
-            auto next_result = state.handleReply(std::move(reply));
-            if (!next_result.has_value()) {
-                co_return std::unexpected(std::move(next_result.error()));
+galay::kernel::MachineAction<MongoConnectAwaitable::Machine::result_type>
+MongoConnectAwaitable::Machine::advance()
+{
+        if (m_state->result.has_value()) {
+            return galay::kernel::MachineAction<result_type>::complete(
+                std::move(*m_state->result));
+        }
+
+        if (m_state->pending_error.has_value()) {
+            m_state->result = std::unexpected(std::move(*m_state->pending_error));
+            m_state->pending_error.reset();
+            m_state->phase = Phase::Invalid;
+            return galay::kernel::MachineAction<result_type>::complete(
+                std::move(*m_state->result));
+        }
+
+        switch (m_state->phase) {
+        case Phase::Invalid:
+            m_state->result = std::unexpected(
+                MongoError(MONGO_ERROR_INTERNAL, "Invalid Mongo connect awaitable"));
+            return galay::kernel::MachineAction<result_type>::complete(
+                std::move(*m_state->result));
+
+        case Phase::Connect:
+            return galay::kernel::MachineAction<result_type>::waitConnect(m_state->host);
+
+        case Phase::SendRequest:
+            return advanceSendRequest();
+
+        case Phase::RecvReply:
+            return advanceRecvReply();
+
+        case Phase::HandleReply:
+            return advanceHandleReply();
+
+        case Phase::Done:
+            if (!m_state->result.has_value()) {
+                m_state->result = true;
             }
-            if (next_result.value()) {
-                client.m_is_closed = false;
-                if (state.auth_enabled) {
-                    MongoLogInfo(client.m_logger.get(),
-                                 "Mongo connected and authenticated successfully to {}:{}",
-                                 state.config.host,
-                                 state.config.port);
-                } else {
-                    MongoLogInfo(client.m_logger.get(),
-                                 "Mongo connected successfully to {}:{}",
-                                 state.config.host,
-                                 state.config.port);
-                }
-                co_return true;
-            }
+            return galay::kernel::MachineAction<result_type>::complete(
+                std::move(*m_state->result));
+        }
+
+        m_state->result = std::unexpected(
+            MongoError(MONGO_ERROR_INTERNAL, "Unknown Mongo connect awaitable phase"));
+        return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
+    }
+
+void MongoConnectAwaitable::Machine::onConnect(
+    std::expected<void, galay::kernel::IOError> result)
+{
+        if (!result.has_value()) {
+            m_state->pending_error = mapIoError(result.error(), MONGO_ERROR_CONNECTION);
+            m_state->phase = Phase::Invalid;
+            return;
+        }
+
+        trySetTcpNoDelay(m_state->client->socket().handle().fd,
+                         m_state->flow.config.tcp_nodelay);
+        m_state->sent = 0;
+        m_state->phase = Phase::SendRequest;
+    }
+
+void MongoConnectAwaitable::Machine::onRead(
+    std::expected<size_t, galay::kernel::IOError> result)
+{
+        applyReadResult(*m_state->client,
+                        std::move(result),
+                        MONGO_ERROR_RECV,
+                        "Connection closed while receiving connect/auth reply",
+                        m_state->pending_error);
+        if (m_state->pending_error.has_value()) {
+            m_state->phase = Phase::Invalid;
+            return;
+        }
+        m_state->phase = Phase::RecvReply;
+    }
+
+void MongoConnectAwaitable::Machine::onWrite(
+    std::expected<size_t, galay::kernel::IOError> result)
+{
+        applyWriteResult(std::move(result),
+                         m_state->sent,
+                         MONGO_ERROR_SEND,
+                         "Connection closed during connect/auth request send",
+                         m_state->pending_error);
+        if (m_state->pending_error.has_value()) {
+            m_state->phase = Phase::Invalid;
+            return;
+        }
+
+        const std::array<SendSegment, 1> segments{{
+            SendSegment{m_state->flow.encoded_request.data(),
+                        m_state->flow.encoded_request.size()}
+        }};
+        if (m_state->sent >= totalSegmentLength(std::span<const SendSegment>(segments))) {
+            m_state->phase = Phase::RecvReply;
+        } else {
+            m_state->phase = Phase::SendRequest;
         }
     }
 
-    static MongoCommandAwaitable command(AsyncMongoClient& client,
-                                         std::string database,
-                                         MongoDocument command)
-    {
-        if (client.m_is_closed) {
-            co_return std::unexpected(MongoError(MONGO_ERROR_CONNECTION,
-                                                 "Mongo client is not connected"));
+galay::kernel::MachineAction<MongoConnectAwaitable::Machine::result_type>
+MongoConnectAwaitable::Machine::advanceSendRequest()
+{
+        const std::array<SendSegment, 1> segments{{
+            SendSegment{m_state->flow.encoded_request.data(),
+                        m_state->flow.encoded_request.size()}
+        }};
+        const auto segment_span = std::span<const SendSegment>(segments);
+        if (m_state->sent >= totalSegmentLength(segment_span)) {
+            m_state->phase = Phase::RecvReply;
+            return advance();
         }
 
-        const int32_t request_id = client.nextRequestId();
-        std::array<char, 4> request_id_le{};
+        if (!prepareWriteWindow(m_state->write_iovecs,
+                                m_state->write_iov_count,
+                                m_state->send_iovec_scratch,
+                                segment_span,
+                                m_state->sent,
+                                m_state->pending_error)) {
+            return advance();
+        }
+
+        return galay::kernel::MachineAction<result_type>::waitWritev(
+            m_state->write_iovecs.data(),
+            m_state->write_iov_count);
+    }
+
+galay::kernel::MachineAction<MongoConnectAwaitable::Machine::result_type>
+MongoConnectAwaitable::Machine::advanceRecvReply()
+{
+        auto message_or_err = AsyncMongoClientInternals::tryParseMessage(*m_state->client);
+        if (!message_or_err.has_value()) {
+            m_state->pending_error = std::move(message_or_err.error());
+            return advance();
+        }
+        if (message_or_err->has_value()) {
+            m_state->current_message = std::move(message_or_err->value());
+            m_state->phase = Phase::HandleReply;
+            return advance();
+        }
+
+        if (!prepareReadWindow(*m_state->client,
+                               m_state->read_iovecs,
+                               m_state->read_iov_count,
+                               "No writable ring buffer space while receiving connect/auth reply",
+                               m_state->pending_error)) {
+            return advance();
+        }
+
+        return galay::kernel::MachineAction<result_type>::waitReadv(
+            m_state->read_iovecs.data(),
+            m_state->read_iov_count);
+    }
+
+galay::kernel::MachineAction<MongoConnectAwaitable::Machine::result_type>
+MongoConnectAwaitable::Machine::advanceHandleReply()
+{
+        if (!m_state->current_message.has_value()) {
+            m_state->pending_error = MongoError(MONGO_ERROR_INTERNAL,
+                                                "Missing Mongo connect/auth reply message");
+            return advance();
+        }
+
+        MongoReply reply(std::move(m_state->current_message->body));
+        m_state->current_message.reset();
+        if (!reply.ok()) {
+            m_state->pending_error = makeServerError(std::move(reply),
+                                                     "Mongo connect/auth command failed");
+            return advance();
+        }
+
+        auto next_result = m_state->flow.handleReply(std::move(reply));
+        if (!next_result.has_value()) {
+            m_state->pending_error = std::move(next_result.error());
+            return advance();
+        }
+        if (next_result.value()) {
+            AsyncMongoClientInternals::completeConnectSuccess(*m_state->client, m_state->flow);
+            m_state->result = true;
+            m_state->phase = Phase::Done;
+            return advance();
+        }
+
+        m_state->sent = 0;
+        m_state->phase = Phase::SendRequest;
+        return advance();
+}
+
+MongoConnectAwaitable::MongoConnectAwaitable(AsyncMongoClient& client, MongoConfig config)
+    : m_state(std::make_shared<SharedState>(client, std::move(config)))
+    , m_inner(galay::kernel::AwaitableBuilder<Result>::fromStateMachine(
+                  client.socket().controller(),
+                  Machine(m_state))
+                  .build())
+{
+}
+
+bool MongoConnectAwaitable::isInvalid() const
+{
+    return !m_state || m_state->phase == Phase::Invalid;
+}
+
+struct MongoCommandAwaitable::SharedState {
+    SharedState(AsyncMongoClient& client_ref, std::string db, MongoDocument cmd)
+        : client(&client_ref)
+        , database(std::move(db))
+        , command(std::move(cmd))
+    {
+        if (client->m_is_closed) {
+            pending_error = MongoError(MONGO_ERROR_CONNECTION, "Mongo client is not connected");
+            phase = Phase::Invalid;
+            return;
+        }
+
+        request_id = client->nextRequestId();
         writeInt32LE(request_id_le.data(), request_id);
 
-        std::string encoded_request;
-        std::array<SendSegment, 3> send_segments{};
-        size_t send_segment_count = 0;
-
         if (isSimplePingCommand(command, database)) {
-            if (client.m_ping_encoded_template.empty() || client.m_ping_template_db != database) {
-                client.m_ping_template_db = database;
-                client.m_ping_encoded_template.clear();
+            if (client->m_ping_encoded_template.empty() || client->m_ping_template_db != database) {
+                client->m_ping_template_db = database;
+                client->m_ping_encoded_template.clear();
                 protocol::MongoProtocol::appendOpMsgWithDatabase(
-                    client.m_ping_encoded_template,
+                    client->m_ping_encoded_template,
                     0,
                     command,
                     database);
             }
-
-            if (client.m_ping_encoded_template.size() < 8) {
-                co_return std::unexpected(MongoError(MONGO_ERROR_INTERNAL,
-                                                     "Invalid cached ping template"));
+            if (client->m_ping_encoded_template.size() < 8) {
+                pending_error = MongoError(MONGO_ERROR_INTERNAL, "Invalid cached ping template");
+                phase = Phase::Invalid;
+                return;
             }
-
-            send_segments[0] = SendSegment{client.m_ping_encoded_template.data(), 4};
+            send_segments[0] = SendSegment{client->m_ping_encoded_template.data(), 4};
             send_segments[1] = SendSegment{request_id_le.data(), request_id_le.size()};
             send_segments[2] = SendSegment{
-                client.m_ping_encoded_template.data() + 8,
-                client.m_ping_encoded_template.size() - 8
+                client->m_ping_encoded_template.data() + 8,
+                client->m_ping_encoded_template.size() - 8
             };
             send_segment_count = 3;
         } else {
@@ -997,130 +1169,431 @@ struct AsyncMongoClientInternals
             send_segments[0] = SendSegment{encoded_request.data(), encoded_request.size()};
             send_segment_count = 1;
         }
-
-        auto send_result = co_await sendSegments(
-            client,
-            std::span<const SendSegment>(send_segments.data(), send_segment_count),
-            MONGO_ERROR_SEND,
-            "Connection closed during command send");
-        if (!send_result.has_value()) {
-            co_return std::unexpected(std::move(send_result.error()));
-        }
-
-        auto message_result = co_await recvMessage(
-            client,
-            MONGO_ERROR_RECV,
-            "Connection closed while receiving command reply",
-            "No writable ring buffer space while receiving command reply");
-        if (!message_result.has_value()) {
-            co_return std::unexpected(std::move(message_result.error()));
-        }
-        if (message_result->header.response_to != request_id) {
-            co_return std::unexpected(MongoError(
-                MONGO_ERROR_PROTOCOL,
-                "Response responseTo does not match sent requestId"));
-        }
-
-        MongoReply reply(std::move(message_result->body));
-        if (!reply.ok()) {
-            co_return std::unexpected(makeServerError(std::move(reply), "Mongo command failed"));
-        }
-
-        co_return std::move(reply);
+        total_len = totalSegmentLength(std::span<const SendSegment>(send_segments.data(),
+                                                                    send_segment_count));
     }
 
-    static MongoPipelineAwaitable pipeline(AsyncMongoClient& client,
-                                           std::string database,
-                                           std::span<const MongoDocument> commands)
+    AsyncMongoClient* client = nullptr;
+    std::string database;
+    MongoDocument command;
+    int32_t request_id = 0;
+    std::array<char, 4> request_id_le{};
+    std::string encoded_request;
+    std::array<SendSegment, 3> send_segments{};
+    size_t send_segment_count = 0;
+    size_t total_len = 0;
+    size_t sent = 0;
+    std::vector<struct iovec> write_scratch;
+    std::array<struct iovec, kMongoMaxWriteIovecs> write_iovecs{};
+    size_t write_iov_count = 0;
+    std::array<struct iovec, 2> read_iovecs{};
+    size_t read_iov_count = 0;
+    Phase phase = Phase::SendCommand;
+    std::optional<MongoError> pending_error;
+    std::optional<Result> result;
+};
+
+MongoCommandAwaitable::Machine::Machine(std::shared_ptr<SharedState> state)
+    : m_state(std::move(state))
+{
+}
+
+galay::kernel::MachineAction<MongoCommandAwaitable::Machine::result_type>
+MongoCommandAwaitable::Machine::advance()
+{
+    if (m_state->result.has_value()) {
+        return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
+    }
+    if (m_state->pending_error.has_value()) {
+        setError(std::move(*m_state->pending_error));
+        m_state->pending_error.reset();
+        return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
+    }
+
+    switch (m_state->phase) {
+    case Phase::Invalid:
+        setError(MongoError(MONGO_ERROR_INTERNAL, "Mongo command machine entered invalid state"));
+        return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
+    case Phase::SendCommand:
+        return advanceSendCommand();
+    case Phase::RecvReply:
+        return advanceRecvReply();
+    case Phase::Done:
+        return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
+    }
+
+    setError(MongoError(MONGO_ERROR_INTERNAL, "Unknown Mongo command machine state"));
+    return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
+}
+
+void MongoCommandAwaitable::Machine::onRead(
+    std::expected<size_t, galay::kernel::IOError> result)
+{
+    applyReadResult(*m_state->client,
+                    std::move(result),
+                    MONGO_ERROR_RECV,
+                    "Connection closed while receiving command reply",
+                    m_state->pending_error);
+    if (m_state->pending_error.has_value()) {
+        m_state->phase = Phase::Invalid;
+        return;
+    }
+    m_state->phase = Phase::RecvReply;
+}
+
+void MongoCommandAwaitable::Machine::onWrite(
+    std::expected<size_t, galay::kernel::IOError> result)
+{
+    applyWriteResult(std::move(result),
+                     m_state->sent,
+                     MONGO_ERROR_SEND,
+                     "Connection closed during command send",
+                     m_state->pending_error);
+    if (m_state->pending_error.has_value()) {
+        m_state->phase = Phase::Invalid;
+        return;
+    }
+    if (m_state->sent >= m_state->total_len) {
+        m_state->sent = 0;
+        m_state->phase = Phase::RecvReply;
+    } else {
+        m_state->phase = Phase::SendCommand;
+    }
+}
+
+galay::kernel::MachineAction<MongoCommandAwaitable::Machine::result_type>
+MongoCommandAwaitable::Machine::advanceSendCommand()
+{
+    if (m_state->sent >= m_state->total_len) {
+        m_state->sent = 0;
+        m_state->phase = Phase::RecvReply;
+        return advance();
+    }
+
+    if (!prepareWriteWindow(m_state->write_iovecs,
+                            m_state->write_iov_count,
+                            m_state->write_scratch,
+                            std::span<const SendSegment>(m_state->send_segments.data(),
+                                                         m_state->send_segment_count),
+                            m_state->sent,
+                            m_state->pending_error)) {
+        return advance();
+    }
+    return galay::kernel::MachineAction<result_type>::waitWritev(
+        m_state->write_iovecs.data(),
+        m_state->write_iov_count);
+}
+
+galay::kernel::MachineAction<MongoCommandAwaitable::Machine::result_type>
+MongoCommandAwaitable::Machine::advanceRecvReply()
+{
+    auto message_or_err = AsyncMongoClientInternals::tryParseMessage(*m_state->client);
+    if (!message_or_err.has_value()) {
+        setError(std::move(message_or_err.error()));
+        return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
+    }
+    if (message_or_err->has_value()) {
+        finishWithMessage(std::move(message_or_err->value()));
+        return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
+    }
+
+    if (!prepareReadWindow(*m_state->client,
+                           m_state->read_iovecs,
+                           m_state->read_iov_count,
+                           "No writable ring buffer space while receiving command reply",
+                           m_state->pending_error)) {
+        return advance();
+    }
+    return galay::kernel::MachineAction<result_type>::waitReadv(
+        m_state->read_iovecs.data(),
+        m_state->read_iov_count);
+}
+
+void MongoCommandAwaitable::Machine::finishWithMessage(protocol::MongoMessage message)
+{
+    if (message.header.response_to != m_state->request_id) {
+        setError(MongoError(MONGO_ERROR_PROTOCOL,
+                            "Response responseTo does not match sent requestId"));
+        return;
+    }
+
+    MongoReply reply(std::move(message.body));
+    if (!reply.ok()) {
+        setError(makeServerError(std::move(reply), "Mongo command failed"));
+        return;
+    }
+
+    m_state->phase = Phase::Done;
+    m_state->result = std::move(reply);
+}
+
+void MongoCommandAwaitable::Machine::setError(MongoError error) noexcept
+{
+    m_state->result = std::unexpected(std::move(error));
+    m_state->phase = Phase::Invalid;
+}
+
+MongoCommandAwaitable::MongoCommandAwaitable(AsyncMongoClient& client,
+                                             std::string database,
+                                             MongoDocument command)
+    : m_state(std::make_shared<SharedState>(client, std::move(database), std::move(command)))
+    , m_inner(galay::kernel::AwaitableBuilder<Result>::fromStateMachine(
+                  client.socket().controller(),
+                  Machine(m_state))
+                  .build())
+{
+}
+
+bool MongoCommandAwaitable::isInvalid() const
+{
+    return m_state != nullptr && m_state->phase == Phase::Invalid;
+}
+
+struct MongoPipelineAwaitable::SharedState {
+    SharedState(AsyncMongoClient& client_ref,
+                std::string db,
+                std::span<const MongoDocument> commands)
+        : client(&client_ref)
+        , database(std::move(db))
     {
-        if (client.m_is_closed) {
-            co_return std::unexpected(MongoError(MONGO_ERROR_CONNECTION,
-                                                 "Mongo client is not connected"));
+        if (client->m_is_closed) {
+            pending_error = MongoError(MONGO_ERROR_CONNECTION, "Mongo client is not connected");
+            phase = Phase::Invalid;
+            return;
         }
         if (commands.empty()) {
-            co_return std::unexpected(MongoError(MONGO_ERROR_INVALID_PARAM,
-                                                 "Pipeline commands must not be empty"));
+            pending_error = MongoError(MONGO_ERROR_INVALID_PARAM,
+                                       "Pipeline commands must not be empty");
+            phase = Phase::Invalid;
+            return;
         }
         if (commands.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max())) {
-            co_return std::unexpected(MongoError(MONGO_ERROR_INVALID_PARAM,
-                                                 "Pipeline commands exceed supported size"));
+            pending_error = MongoError(MONGO_ERROR_INVALID_PARAM,
+                                       "Pipeline commands exceed supported size");
+            phase = Phase::Invalid;
+            return;
         }
 
-        std::vector<MongoPipelineResponse> responses(commands.size());
-        const int32_t first_request_id = client.reserveRequestIdBlock(commands.size());
+        responses.resize(commands.size());
+        first_request_id = client->reserveRequestIdBlock(commands.size());
         for (size_t i = 0; i < commands.size(); ++i) {
             responses[i].request_id = static_cast<int32_t>(
                 static_cast<int64_t>(first_request_id) + static_cast<int64_t>(i));
         }
 
-        const std::string encoded_batch = protocol::MongoCommandBuilder::encodePipeline(
+        encoded_batch = protocol::MongoCommandBuilder::encodePipeline(
             database,
             first_request_id,
             commands,
-            client.m_pipeline_reserve_per_command);
-
-        const std::array<SendSegment, 1> send_segments{{
-            SendSegment{encoded_batch.data(), encoded_batch.size()}
-        }};
-        auto send_result = co_await sendSegments(
-            client,
-            std::span<const SendSegment>(send_segments),
-            MONGO_ERROR_SEND,
-            "Connection closed during pipeline send");
-        if (!send_result.has_value()) {
-            co_return std::unexpected(std::move(send_result.error()));
-        }
-
-        size_t received = 0;
-        while (received < responses.size()) {
-            auto message_result = co_await recvMessage(
-                client,
-                MONGO_ERROR_RECV,
-                "Connection closed while receiving pipeline replies",
-                "No writable ring buffer space while receiving pipeline replies");
-            if (!message_result.has_value()) {
-                co_return std::unexpected(std::move(message_result.error()));
-            }
-
-            const int32_t response_to = message_result->header.response_to;
-            if (response_to <= 0) {
-                co_return std::unexpected(MongoError(MONGO_ERROR_PROTOCOL,
-                                                     "Pipeline response has invalid responseTo"));
-            }
-
-            const int64_t index_i64 =
-                static_cast<int64_t>(response_to) - static_cast<int64_t>(first_request_id);
-            if (index_i64 < 0 || index_i64 >= static_cast<int64_t>(responses.size())) {
-                co_return std::unexpected(MongoError(
-                    MONGO_ERROR_PROTOCOL,
-                    "Pipeline responseTo does not match any in-flight requestId"));
-            }
-
-            auto& slot = responses[static_cast<size_t>(index_i64)];
-            if (slot.request_id != response_to) {
-                co_return std::unexpected(MongoError(
-                    MONGO_ERROR_PROTOCOL,
-                    "Pipeline responseTo does not map to expected requestId"));
-            }
-            if (slot.reply.has_value() || slot.error.has_value()) {
-                co_return std::unexpected(MongoError(
-                    MONGO_ERROR_PROTOCOL,
-                    "Pipeline received duplicate response for the same requestId"));
-            }
-
-            MongoReply reply(std::move(message_result->body));
-            if (reply.ok()) {
-                slot.reply = std::move(reply);
-            } else {
-                slot.error = makeServerError(std::move(reply), "Mongo pipeline command failed");
-            }
-
-            ++received;
-        }
-
-        co_return responses;
+            client->m_pipeline_reserve_per_command);
+        send_segments[0] = SendSegment{encoded_batch.data(), encoded_batch.size()};
+        send_segment_count = 1;
+        total_len = encoded_batch.size();
+        phase = Phase::SendCommands;
     }
+
+    AsyncMongoClient* client = nullptr;
+    std::string database;
+    int32_t first_request_id = 0;
+    std::string encoded_batch;
+    std::array<SendSegment, 1> send_segments{};
+    size_t send_segment_count = 0;
+    size_t total_len = 0;
+    size_t sent = 0;
+    size_t received = 0;
+    std::vector<MongoPipelineResponse> responses;
+    std::vector<struct iovec> write_scratch;
+    std::array<struct iovec, kMongoMaxWriteIovecs> write_iovecs{};
+    size_t write_iov_count = 0;
+    std::array<struct iovec, 2> read_iovecs{};
+    size_t read_iov_count = 0;
+    Phase phase = Phase::Invalid;
+    std::optional<MongoError> pending_error;
+    std::optional<Result> result;
 };
+
+MongoPipelineAwaitable::Machine::Machine(std::shared_ptr<SharedState> state)
+    : m_state(std::move(state))
+{
+}
+
+galay::kernel::MachineAction<MongoPipelineAwaitable::Machine::result_type>
+MongoPipelineAwaitable::Machine::advance()
+{
+    if (m_state->result.has_value()) {
+        return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
+    }
+    if (m_state->pending_error.has_value()) {
+        setError(std::move(*m_state->pending_error));
+        m_state->pending_error.reset();
+        return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
+    }
+
+    switch (m_state->phase) {
+    case Phase::Invalid:
+        setError(MongoError(MONGO_ERROR_INTERNAL, "Mongo pipeline machine entered invalid state"));
+        return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
+    case Phase::SendCommands:
+        return advanceSendCommands();
+    case Phase::RecvReplies:
+        return advanceRecvReplies();
+    case Phase::Done:
+        return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
+    }
+
+    setError(MongoError(MONGO_ERROR_INTERNAL, "Unknown Mongo pipeline machine state"));
+    return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
+}
+
+void MongoPipelineAwaitable::Machine::onRead(
+    std::expected<size_t, galay::kernel::IOError> result)
+{
+    applyReadResult(*m_state->client,
+                    std::move(result),
+                    MONGO_ERROR_RECV,
+                    "Connection closed while receiving pipeline replies",
+                    m_state->pending_error);
+    if (m_state->pending_error.has_value()) {
+        m_state->phase = Phase::Invalid;
+        return;
+    }
+    m_state->phase = Phase::RecvReplies;
+}
+
+void MongoPipelineAwaitable::Machine::onWrite(
+    std::expected<size_t, galay::kernel::IOError> result)
+{
+    applyWriteResult(std::move(result),
+                     m_state->sent,
+                     MONGO_ERROR_SEND,
+                     "Connection closed during pipeline send",
+                     m_state->pending_error);
+    if (m_state->pending_error.has_value()) {
+        m_state->phase = Phase::Invalid;
+        return;
+    }
+    if (m_state->sent >= m_state->total_len) {
+        m_state->phase = Phase::RecvReplies;
+    } else {
+        m_state->phase = Phase::SendCommands;
+    }
+}
+
+galay::kernel::MachineAction<MongoPipelineAwaitable::Machine::result_type>
+MongoPipelineAwaitable::Machine::advanceSendCommands()
+{
+    if (m_state->sent >= m_state->total_len) {
+        m_state->phase = Phase::RecvReplies;
+        return advance();
+    }
+
+    if (!prepareWriteWindow(m_state->write_iovecs,
+                            m_state->write_iov_count,
+                            m_state->write_scratch,
+                            std::span<const SendSegment>(m_state->send_segments.data(),
+                                                         m_state->send_segment_count),
+                            m_state->sent,
+                            m_state->pending_error)) {
+        return advance();
+    }
+
+    return galay::kernel::MachineAction<result_type>::waitWritev(
+        m_state->write_iovecs.data(),
+        m_state->write_iov_count);
+}
+
+galay::kernel::MachineAction<MongoPipelineAwaitable::Machine::result_type>
+MongoPipelineAwaitable::Machine::advanceRecvReplies()
+{
+    while (m_state->received < m_state->responses.size()) {
+        auto parsed = AsyncMongoClientInternals::tryParseMessage(*m_state->client);
+        if (!parsed.has_value()) {
+            setError(std::move(parsed.error()));
+            return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
+        }
+        if (!parsed->has_value()) {
+            if (!prepareReadWindow(*m_state->client,
+                                   m_state->read_iovecs,
+                                   m_state->read_iov_count,
+                                   "No writable ring buffer space while receiving pipeline replies",
+                                   m_state->pending_error)) {
+                return advance();
+            }
+            return galay::kernel::MachineAction<result_type>::waitReadv(
+                m_state->read_iovecs.data(),
+                m_state->read_iov_count);
+        }
+
+        if (!storeResponse(std::move(parsed->value()))) {
+            return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
+        }
+        ++m_state->received;
+    }
+
+    m_state->phase = Phase::Done;
+    m_state->result = std::move(m_state->responses);
+    return galay::kernel::MachineAction<result_type>::complete(std::move(*m_state->result));
+}
+
+bool MongoPipelineAwaitable::Machine::storeResponse(protocol::MongoMessage message)
+{
+    const int32_t response_to = message.header.response_to;
+    if (response_to <= 0) {
+        setError(MongoError(MONGO_ERROR_PROTOCOL,
+                            "Pipeline response has invalid responseTo"));
+        return false;
+    }
+
+    const int64_t index_i64 =
+        static_cast<int64_t>(response_to) - static_cast<int64_t>(m_state->first_request_id);
+    if (index_i64 < 0 || index_i64 >= static_cast<int64_t>(m_state->responses.size())) {
+        setError(MongoError(MONGO_ERROR_PROTOCOL,
+                            "Pipeline responseTo does not match any in-flight requestId"));
+        return false;
+    }
+
+    auto& slot = m_state->responses[static_cast<size_t>(index_i64)];
+    if (slot.request_id != response_to) {
+        setError(MongoError(MONGO_ERROR_PROTOCOL,
+                            "Pipeline responseTo does not map to expected requestId"));
+        return false;
+    }
+    if (slot.reply.has_value() || slot.error.has_value()) {
+        setError(MongoError(MONGO_ERROR_PROTOCOL,
+                            "Pipeline received duplicate response for the same requestId"));
+        return false;
+    }
+
+    MongoReply reply(std::move(message.body));
+    if (reply.ok()) {
+        slot.reply = std::move(reply);
+    } else {
+        slot.error = makeServerError(std::move(reply), "Mongo pipeline command failed");
+    }
+    return true;
+}
+
+void MongoPipelineAwaitable::Machine::setError(MongoError error) noexcept
+{
+    m_state->result = std::unexpected(std::move(error));
+    m_state->phase = Phase::Invalid;
+}
+
+MongoPipelineAwaitable::MongoPipelineAwaitable(AsyncMongoClient& client,
+                                               std::string database,
+                                               std::span<const MongoDocument> commands)
+    : m_state(std::make_shared<SharedState>(client, std::move(database), commands))
+    , m_inner(galay::kernel::AwaitableBuilder<Result>::fromStateMachine(
+                  client.socket().controller(),
+                  Machine(m_state))
+                  .build())
+{
+}
+
+bool MongoPipelineAwaitable::isInvalid() const
+{
+    return m_state != nullptr && m_state->phase == Phase::Invalid;
+}
 
 int32_t AsyncMongoClient::reserveRequestIdBlock(size_t count)
 {
@@ -1210,7 +1683,7 @@ AsyncMongoClient& AsyncMongoClient::operator=(AsyncMongoClient&& other) noexcept
 
 MongoConnectAwaitable AsyncMongoClient::connect(MongoConfig config)
 {
-    return AsyncMongoClientInternals::connect(*this, std::move(config));
+    return MongoConnectAwaitable(*this, std::move(config));
 }
 
 MongoConnectAwaitable AsyncMongoClient::connect(std::string_view host,
@@ -1226,7 +1699,7 @@ MongoConnectAwaitable AsyncMongoClient::connect(std::string_view host,
 
 MongoCommandAwaitable AsyncMongoClient::command(std::string database, MongoDocument command)
 {
-    return AsyncMongoClientInternals::command(*this, std::move(database), std::move(command));
+    return MongoCommandAwaitable(*this, std::move(database), std::move(command));
 }
 
 MongoCommandAwaitable AsyncMongoClient::ping(std::string database)
@@ -1239,7 +1712,7 @@ MongoCommandAwaitable AsyncMongoClient::ping(std::string database)
 MongoPipelineAwaitable AsyncMongoClient::pipeline(std::string database,
                                                   std::span<const MongoDocument> commands)
 {
-    return AsyncMongoClientInternals::pipeline(*this, std::move(database), commands);
+    return MongoPipelineAwaitable(*this, std::move(database), commands);
 }
 
 } // namespace galay::mongo

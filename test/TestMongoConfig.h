@@ -91,27 +91,29 @@ inline galay::mongo::MongoConfig toMongoConfig(const MongoTestConfig& test_cfg)
     return cfg;
 }
 
+struct AsyncMongoOperationTimeout
+{
+    bool enabled = false;
+    std::chrono::milliseconds value{0};
+};
+
+inline AsyncMongoOperationTimeout loadAsyncMongoOperationTimeout()
+{
+    const char* timeout_env = std::getenv("GALAY_MONGO_ASYNC_TIMEOUT_MS");
+    if (timeout_env == nullptr) {
+        return {};
+    }
+
+    try {
+        return AsyncMongoOperationTimeout{true, std::chrono::milliseconds(std::stoi(timeout_env))};
+    } catch (...) {
+        return {};
+    }
+}
+
 inline galay::mongo::AsyncMongoConfig loadAsyncMongoTestConfig()
 {
     galay::mongo::AsyncMongoConfig cfg = galay::mongo::AsyncMongoConfig::noTimeout();
-
-    const char* send_timeout_env = std::getenv("GALAY_MONGO_ASYNC_SEND_TIMEOUT_MS");
-    if (send_timeout_env != nullptr) {
-        try {
-            const int value = std::stoi(send_timeout_env);
-            cfg.send_timeout = std::chrono::milliseconds(value);
-        } catch (...) {
-        }
-    }
-
-    const char* recv_timeout_env = std::getenv("GALAY_MONGO_ASYNC_RECV_TIMEOUT_MS");
-    if (recv_timeout_env != nullptr) {
-        try {
-            const int value = std::stoi(recv_timeout_env);
-            cfg.recv_timeout = std::chrono::milliseconds(value);
-        } catch (...) {
-        }
-    }
 
     const char* buffer_size_env = std::getenv("GALAY_MONGO_ASYNC_BUFFER_SIZE");
     if (buffer_size_env != nullptr) {

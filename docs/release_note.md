@@ -37,3 +37,14 @@
 - 变更摘要:
   - 将源码仓库中的包配置模板重命名为小写 kebab-case `galay-mongo-config.cmake.in`，统一 `galay-*` 子项目的模板文件风格。
   - 同步调整 `configure_package_config_file(...)` 的模板输入路径，同时保持安装导出的 `galay-mongo-config.cmake` 与版本文件名兼容不变。
+
+## v1.2.0 - 2026-04-27
+
+- 版本级别: 中版本
+- Git 提交消息: `feat: 将异步 Mongo 客户端统一为状态机 whole-timeout 语义`
+- Git tag: `v1.2.0`
+- 变更摘要:
+  - 将 `AsyncMongoClient` 公开异步接口统一到状态机 awaitable 风格，补齐 `connect` 与 command/pipeline 路径的一致实现方式，和 `galay-http` 保持同一套异步交互模型。
+  - 为 `connect`、`command`、`ping`、`pipeline` 的公开 awaitable 补齐调用点 `.timeout(...)` 能力，并将 timeout 语义收敛为覆盖整个逻辑操作的 whole timeout。
+  - 移除 `AsyncMongoConfig` 中旧的 send/recv split timeout 配置，同步更新 builder、测试配置、include/import 示例与 `T3`/`T5`/`T6` 测试用法。
+  - 通过真实 Mongo 实例验证成功路径与超时路径，确认 connect/auth 流程与 pipeline/CRUD 操作都按 Mongo 侧 timeout 语义稳定返回。

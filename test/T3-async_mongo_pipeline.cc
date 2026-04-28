@@ -25,6 +25,7 @@ struct AsyncClientConfig
 {
     MongoConfig mongo;
     AsyncMongoConfig async;
+    mongo_test::AsyncMongoOperationTimeout timeout;
 };
 
 Task<void> runPipelineTest(IOScheduler* scheduler,
@@ -37,8 +38,12 @@ Task<void> runPipelineTest(IOScheduler* scheduler,
         .bufferProvider(std::make_shared<MongoRingBufferProvider>(cfg.async.buffer_size))
         .build();
 
-    const std::expected<bool, MongoError> conn_result =
-        co_await client.connect(std::move(cfg.mongo));
+    std::expected<bool, MongoError> conn_result;
+    if (cfg.timeout.enabled) {
+        conn_result = co_await client.connect(cfg.mongo).timeout(cfg.timeout.value);
+    } else {
+        conn_result = co_await client.connect(cfg.mongo);
+    }
     if (!conn_result) {
         state->ok.store(false, std::memory_order_relaxed);
         state->error = "connect failed: " + conn_result.error().message();
@@ -52,8 +57,12 @@ Task<void> runPipelineTest(IOScheduler* scheduler,
     commands.append("galayUnknownCommand", int32_t(1));
     commands.append("ping", int32_t(1));
 
-    const std::expected<std::vector<MongoPipelineResponse>, MongoError> pipeline_result =
-        co_await client.pipeline("admin", commands.commands());
+    std::expected<std::vector<MongoPipelineResponse>, MongoError> pipeline_result;
+    if (cfg.timeout.enabled) {
+        pipeline_result = co_await client.pipeline("admin", commands.commands()).timeout(cfg.timeout.value);
+    } else {
+        pipeline_result = co_await client.pipeline("admin", commands.commands());
+    }
     if (!pipeline_result) {
         state->ok.store(false, std::memory_order_relaxed);
         state->error = "pipeline failed: " + pipeline_result.error().message();
@@ -120,7 +129,8 @@ int main()
                                       &state,
                                       AsyncClientConfig{
                                           mongo_test::toMongoConfig(test_cfg),
-                                          mongo_test::loadAsyncMongoTestConfig()}))) {
+                                          mongo_test::loadAsyncMongoTestConfig(),
+                                          mongo_test::loadAsyncMongoOperationTimeout()}))) {
         std::cerr << "Failed to schedule async pipeline task" << std::endl;
         runtime.stop();
         return 1;

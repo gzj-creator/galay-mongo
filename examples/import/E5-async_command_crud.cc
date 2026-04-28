@@ -113,6 +113,7 @@ struct AsyncClientConfig
 {
     MongoConfig mongo;
     AsyncMongoConfig async;
+    mongo_example::AsyncMongoOperationTimeout timeout;
 };
 
 void setFailure(RunState* state, std::string message)
@@ -131,35 +132,60 @@ Task<void> run(IOScheduler* scheduler,
     const std::string collection = "galay_mongo_example_async_command_crud";
     const int64_t doc_id = makeUniqueId();
 
-    const std::expected<bool, MongoError> conn_result = co_await client.connect(cfg.mongo);
+    std::expected<bool, MongoError> conn_result;
+    if (cfg.timeout.enabled) {
+        conn_result = co_await client.connect(cfg.mongo).timeout(cfg.timeout.value);
+    } else {
+        conn_result = co_await client.connect(cfg.mongo);
+    }
     if (!conn_result) {
         setFailure(state, "connect failed: " + conn_result.error().message());
         co_return;
     }
 
-    const std::expected<MongoReply, MongoError> inserted =
-        co_await client.command(cfg.mongo.database, makeInsertCommand(collection, doc_id, 1));
+    std::expected<MongoReply, MongoError> inserted;
+    if (cfg.timeout.enabled) {
+        inserted = co_await client.command(cfg.mongo.database, makeInsertCommand(collection, doc_id, 1))
+                       .timeout(cfg.timeout.value);
+    } else {
+        inserted = co_await client.command(cfg.mongo.database, makeInsertCommand(collection, doc_id, 1));
+    }
     if (!inserted) {
         setFailure(state, "insert failed: " + inserted.error().message());
         co_return;
     }
 
-    const std::expected<MongoReply, MongoError> found =
-        co_await client.command(cfg.mongo.database, makeFindCommand(collection, doc_id));
+    std::expected<MongoReply, MongoError> found;
+    if (cfg.timeout.enabled) {
+        found = co_await client.command(cfg.mongo.database, makeFindCommand(collection, doc_id))
+                    .timeout(cfg.timeout.value);
+    } else {
+        found = co_await client.command(cfg.mongo.database, makeFindCommand(collection, doc_id));
+    }
     if (!found) {
         setFailure(state, "find failed: " + found.error().message());
         co_return;
     }
 
-    const std::expected<MongoReply, MongoError> updated =
-        co_await client.command(cfg.mongo.database, makeUpdateCommand(collection, doc_id, 2));
+    std::expected<MongoReply, MongoError> updated;
+    if (cfg.timeout.enabled) {
+        updated = co_await client.command(cfg.mongo.database, makeUpdateCommand(collection, doc_id, 2))
+                      .timeout(cfg.timeout.value);
+    } else {
+        updated = co_await client.command(cfg.mongo.database, makeUpdateCommand(collection, doc_id, 2));
+    }
     if (!updated) {
         setFailure(state, "update failed: " + updated.error().message());
         co_return;
     }
 
-    const std::expected<MongoReply, MongoError> deleted =
-        co_await client.command(cfg.mongo.database, makeDeleteCommand(collection, doc_id));
+    std::expected<MongoReply, MongoError> deleted;
+    if (cfg.timeout.enabled) {
+        deleted = co_await client.command(cfg.mongo.database, makeDeleteCommand(collection, doc_id))
+                      .timeout(cfg.timeout.value);
+    } else {
+        deleted = co_await client.command(cfg.mongo.database, makeDeleteCommand(collection, doc_id));
+    }
     if (!deleted) {
         setFailure(state, "delete failed: " + deleted.error().message());
         co_return;
@@ -175,6 +201,7 @@ int main()
 {
     const auto mongo_cfg = mongo_example::loadMongoConfigFromEnv();
     const auto async_cfg = mongo_example::loadAsyncMongoConfigFromEnv();
+    const auto timeout_cfg = mongo_example::loadAsyncMongoOperationTimeoutFromEnv();
 
     Runtime runtime;
     runtime.start();
@@ -187,7 +214,7 @@ int main()
     }
 
     RunState state;
-    if (!scheduleTask(scheduler, run(scheduler, &state, AsyncClientConfig{mongo_cfg, async_cfg}))) {
+    if (!scheduleTask(scheduler, run(scheduler, &state, AsyncClientConfig{mongo_cfg, async_cfg, timeout_cfg}))) {
         std::cerr << "Failed to schedule async command CRUD task" << std::endl;
         runtime.stop();
         return 1;

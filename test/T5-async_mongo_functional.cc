@@ -117,6 +117,7 @@ struct AsyncClientConfig
 {
     MongoConfig mongo;
     AsyncMongoConfig async;
+    mongo_test::AsyncMongoOperationTimeout timeout;
 };
 
 void setFailure(AsyncFunctionalState* state, std::string message)
@@ -136,13 +137,23 @@ Task<void> runAsyncFunctional(IOScheduler* scheduler,
     const std::string collection = "galay_mongo_async_functional";
     const int64_t doc_id = makeUniqueId();
 
-    const std::expected<bool, MongoError> connected = co_await client.connect(cfg.mongo);
+    std::expected<bool, MongoError> connected;
+    if (cfg.timeout.enabled) {
+        connected = co_await client.connect(cfg.mongo).timeout(cfg.timeout.value);
+    } else {
+        connected = co_await client.connect(cfg.mongo);
+    }
     if (!connected) {
         setFailure(state, "connect failed: " + connected.error().message());
         co_return;
     }
 
-    const std::expected<MongoReply, MongoError> ping = co_await client.ping(database);
+    std::expected<MongoReply, MongoError> ping;
+    if (cfg.timeout.enabled) {
+        ping = co_await client.ping(database).timeout(cfg.timeout.value);
+    } else {
+        ping = co_await client.ping(database);
+    }
     if (!ping) {
         setFailure(state, "ping failed: " + ping.error().message());
         co_return;
@@ -150,8 +161,12 @@ Task<void> runAsyncFunctional(IOScheduler* scheduler,
 
     MongoDocument ping_cmd;
     ping_cmd.append("ping", int32_t(1));
-    const std::expected<MongoReply, MongoError> ping_by_command =
-        co_await client.command(database, std::move(ping_cmd));
+    std::expected<MongoReply, MongoError> ping_by_command;
+    if (cfg.timeout.enabled) {
+        ping_by_command = co_await client.command(database, ping_cmd).timeout(cfg.timeout.value);
+    } else {
+        ping_by_command = co_await client.command(database, ping_cmd);
+    }
     if (!ping_by_command) {
         setFailure(state, "command(ping) failed: " + ping_by_command.error().message());
         co_return;
@@ -159,8 +174,12 @@ Task<void> runAsyncFunctional(IOScheduler* scheduler,
 
     MongoDocument invalid_cmd;
     invalid_cmd.append("galayUnknownCommand", int32_t(1));
-    const std::expected<MongoReply, MongoError> invalid_reply =
-        co_await client.command(database, std::move(invalid_cmd));
+    std::expected<MongoReply, MongoError> invalid_reply;
+    if (cfg.timeout.enabled) {
+        invalid_reply = co_await client.command(database, invalid_cmd).timeout(cfg.timeout.value);
+    } else {
+        invalid_reply = co_await client.command(database, invalid_cmd);
+    }
     if (invalid_reply) {
         setFailure(state, "invalid command should fail but succeeded");
         co_return;
@@ -170,8 +189,12 @@ Task<void> runAsyncFunctional(IOScheduler* scheduler,
         co_return;
     }
 
-    const std::expected<std::vector<MongoPipelineResponse>, MongoError> empty_pipeline =
-        co_await client.pipeline(database, {});
+    std::expected<std::vector<MongoPipelineResponse>, MongoError> empty_pipeline;
+    if (cfg.timeout.enabled) {
+        empty_pipeline = co_await client.pipeline(database, {}).timeout(cfg.timeout.value);
+    } else {
+        empty_pipeline = co_await client.pipeline(database, {});
+    }
     if (empty_pipeline) {
         setFailure(state, "empty pipeline should fail but succeeded");
         co_return;
@@ -196,8 +219,12 @@ Task<void> runAsyncFunctional(IOScheduler* scheduler,
     c3.append("ping", int32_t(1));
     commands.push_back(std::move(c3));
 
-    const std::expected<std::vector<MongoPipelineResponse>, MongoError> mixed_pipeline =
-        co_await client.pipeline(database, std::move(commands));
+    std::expected<std::vector<MongoPipelineResponse>, MongoError> mixed_pipeline;
+    if (cfg.timeout.enabled) {
+        mixed_pipeline = co_await client.pipeline(database, commands).timeout(cfg.timeout.value);
+    } else {
+        mixed_pipeline = co_await client.pipeline(database, commands);
+    }
     if (!mixed_pipeline) {
         setFailure(state, "mixed pipeline failed: " + mixed_pipeline.error().message());
         co_return;
@@ -229,15 +256,25 @@ Task<void> runAsyncFunctional(IOScheduler* scheduler,
         co_return;
     }
 
-    const std::expected<MongoReply, MongoError> inserted =
-        co_await client.command(database, makeInsertCommand(collection, doc_id, 1, "created"));
+    std::expected<MongoReply, MongoError> inserted;
+    if (cfg.timeout.enabled) {
+        inserted = co_await client.command(database, makeInsertCommand(collection, doc_id, 1, "created"))
+                       .timeout(cfg.timeout.value);
+    } else {
+        inserted = co_await client.command(database, makeInsertCommand(collection, doc_id, 1, "created"));
+    }
     if (!inserted) {
         setFailure(state, "insert command failed: " + inserted.error().message());
         co_return;
     }
 
-    const std::expected<MongoReply, MongoError> found1 =
-        co_await client.command(database, makeFindCommand(collection, doc_id));
+    std::expected<MongoReply, MongoError> found1;
+    if (cfg.timeout.enabled) {
+        found1 = co_await client.command(database, makeFindCommand(collection, doc_id))
+                     .timeout(cfg.timeout.value);
+    } else {
+        found1 = co_await client.command(database, makeFindCommand(collection, doc_id));
+    }
     if (!found1) {
         setFailure(state, "find command(after insert) failed: " + found1.error().message());
         co_return;
@@ -265,15 +302,25 @@ Task<void> runAsyncFunctional(IOScheduler* scheduler,
         co_return;
     }
 
-    const std::expected<MongoReply, MongoError> updated =
-        co_await client.command(database, makeUpdateCommand(collection, doc_id, 2, "updated"));
+    std::expected<MongoReply, MongoError> updated;
+    if (cfg.timeout.enabled) {
+        updated = co_await client.command(database, makeUpdateCommand(collection, doc_id, 2, "updated"))
+                      .timeout(cfg.timeout.value);
+    } else {
+        updated = co_await client.command(database, makeUpdateCommand(collection, doc_id, 2, "updated"));
+    }
     if (!updated) {
         setFailure(state, "update command failed: " + updated.error().message());
         co_return;
     }
 
-    const std::expected<MongoReply, MongoError> found2 =
-        co_await client.command(database, makeFindCommand(collection, doc_id));
+    std::expected<MongoReply, MongoError> found2;
+    if (cfg.timeout.enabled) {
+        found2 = co_await client.command(database, makeFindCommand(collection, doc_id))
+                     .timeout(cfg.timeout.value);
+    } else {
+        found2 = co_await client.command(database, makeFindCommand(collection, doc_id));
+    }
     if (!found2) {
         setFailure(state, "find command(after update) failed: " + found2.error().message());
         co_return;
@@ -291,15 +338,25 @@ Task<void> runAsyncFunctional(IOScheduler* scheduler,
         co_return;
     }
 
-    const std::expected<MongoReply, MongoError> deleted =
-        co_await client.command(database, makeDeleteCommand(collection, doc_id));
+    std::expected<MongoReply, MongoError> deleted;
+    if (cfg.timeout.enabled) {
+        deleted = co_await client.command(database, makeDeleteCommand(collection, doc_id))
+                      .timeout(cfg.timeout.value);
+    } else {
+        deleted = co_await client.command(database, makeDeleteCommand(collection, doc_id));
+    }
     if (!deleted) {
         setFailure(state, "delete command failed: " + deleted.error().message());
         co_return;
     }
 
-    const std::expected<MongoReply, MongoError> found3 =
-        co_await client.command(database, makeFindCommand(collection, doc_id));
+    std::expected<MongoReply, MongoError> found3;
+    if (cfg.timeout.enabled) {
+        found3 = co_await client.command(database, makeFindCommand(collection, doc_id))
+                     .timeout(cfg.timeout.value);
+    } else {
+        found3 = co_await client.command(database, makeFindCommand(collection, doc_id));
+    }
     if (!found3) {
         setFailure(state, "find command(after delete) failed: " + found3.error().message());
         co_return;
@@ -344,7 +401,8 @@ int main()
                                          &state,
                                          AsyncClientConfig{
                                              mongo_test::toMongoConfig(test_cfg),
-                                             mongo_test::loadAsyncMongoTestConfig()}))) {
+                                             mongo_test::loadAsyncMongoTestConfig(),
+                                             mongo_test::loadAsyncMongoOperationTimeout()}))) {
         std::cerr << "Failed to schedule async functional task" << std::endl;
         runtime.stop();
         return 1;
