@@ -13,3 +13,7 @@ add_mongo_test(t5_func t5_func.cc)
 add_mongo_test(t6_auth t6_auth.cc)
 add_mongo_test(t7_bridge t7_bridge.cc)
 add_mongo_test(t8_builder t8_builder.cc)
+add_mongo_test(t9_socket_options_source t9_socket_options_source.cc)
+target_compile_definitions(t9_socket_options_source
+    PRIVATE GALAY_MONGO_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)

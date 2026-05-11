@@ -30,7 +30,6 @@ public:
         std::string host;
         uint16_t port;
         uint32_t timeout_ms;
-        uint32_t socket_timeout_ms;
         bool tcp_nodelay;
         size_t recv_buffer_size;
 

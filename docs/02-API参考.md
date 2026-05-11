@@ -28,7 +28,6 @@
 | `app_name` | `std::string` | `galay-mongo` | hello 元数据 app 名 |
 | `tcp_nodelay` | `bool` | `true` | 是否启用 `TCP_NODELAY` |
 | `connect_timeout_ms` | `uint32_t` | `5000` | 连接超时 |
-| `socket_timeout_ms` | `uint32_t` | `5000` | socket 收发超时 |
 | `recv_buffer_size` | `size_t` | `16384` | 同步连接 RingBuffer 容量（超大单包自动走分段直读 bridge） |
 
 工厂方法：

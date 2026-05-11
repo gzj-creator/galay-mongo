@@ -1,6 +1,7 @@
 #include "connection.h"
 #include "galay-mongo/base/mongo_config.h"
-#include "galay-mongo/base/socket_options.h"
+
+#include <galay-kernel/common/handle_option.h>
 
 #include <algorithm>
 #include <arpa/inet.h>
@@ -37,7 +38,6 @@ Connection::ConnectOptions::ConnectOptions()
     : host(::galay::mongo::MongoConfig::kDefaultHost)
     , port(::galay::mongo::MongoConfig::kDefaultPort)
     , timeout_ms(::galay::mongo::MongoConfig::kDefaultConnectTimeoutMs)
-    , socket_timeout_ms(::galay::mongo::MongoConfig::kDefaultSocketTimeoutMs)
     , tcp_nodelay(::galay::mongo::MongoConfig::kDefaultTcpNoDelay)
     , recv_buffer_size(::galay::mongo::MongoConfig::kDefaultRecvBufferSize)
 {
@@ -50,7 +50,6 @@ Connection::ConnectOptions::fromMongoConfig(const ::galay::mongo::MongoConfig& c
     options.host = config.host;
     options.port = config.port;
     options.timeout_ms = config.connect_timeout_ms;
-    options.socket_timeout_ms = config.socket_timeout_ms;
     options.tcp_nodelay = config.tcp_nodelay;
     options.recv_buffer_size = config.recv_buffer_size;
     return options;
@@ -179,8 +178,17 @@ Connection::connect(const ConnectOptions& options)
                                           std::string(std::strerror(errno))));
     }
 
-    trySetSocketTimeoutMs(m_socket_fd, options.socket_timeout_ms);
-    trySetTcpNoDelay(m_socket_fd, options.tcp_nodelay);
+    if (options.tcp_nodelay) {
+        auto nodelay_result =
+            ::galay::kernel::HandleOption(::GHandle{m_socket_fd}).handleTcpNoDelay();
+        if (!nodelay_result.has_value()) {
+            ::close(m_socket_fd);
+            m_socket_fd = -1;
+            return std::unexpected(MongoError(MONGO_ERROR_CONNECTION,
+                                              "Failed to set TCP_NODELAY: " +
+                                              nodelay_result.error().message()));
+        }
+    }
 
     m_connected = true;
     if (options.recv_buffer_size > 0 && m_recv_ring.capacity() != options.recv_buffer_size) {

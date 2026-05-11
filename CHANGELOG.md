@@ -5,6 +5,22 @@
 
 ## [Unreleased]
 
+## [v3.0.0] - 2026-05-11
+
+### Changed
+- 删除本地 `socket_options.h` socket option helper，`TCP_NODELAY` 统一改为直接复用 `galay-kernel` 的 `HandleOption`。
+- 移除 `MongoConfig::socket_timeout_ms` 与内部 `ConnectOptions::socket_timeout_ms`，不再设置 socket 层 `SO_RCVTIMEO` / `SO_SNDTIMEO`。
+- 同步与异步连接在设置 `TCP_NODELAY` 失败时不再忽略错误，而是返回连接错误。
+
+### Tests
+- 新增 `t9_socket_options_source` 源码约束测试，防止重新引入本地 socket option wrapper、socket 层收发超时或丢弃 `HandleOption` 返回值。
+
+### Docs
+- 更新 API 与常见问题文档，明确同步客户端只保留连接超时，发送/接收超时由异步等待体机制承担。
+
+### Release
+- 本次删除公开配置字段和公开头文件，按大版本发布要求提升版本到 `v3.0.0`。
+
 ## [v2.0.0] - 2026-04-29
 
 ### Changed

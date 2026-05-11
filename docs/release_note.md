@@ -47,3 +47,14 @@
   - 将源码、头文件、测试、示例与 benchmark 文件统一重命名为 lower_snake_case，编号前缀同步改为小写下划线形式。
   - 同步更新 CMake/Bazel 构建描述、模块入口、README/docs、脚本和所有项目内 include 路径引用。
   - 移除项目内相对 include，统一使用基于公开 include 根或模块根的非相对路径。
+
+## v3.0.0 - 2026-05-11
+
+- 版本级别：大版本（major）
+- Git 提交消息：`refactor: 收敛 socket option 到 galay-kernel`
+- Git Tag：`v3.0.0`
+- 自述摘要：
+  - 删除本地 `socket_options.h` helper，`TCP_NODELAY` 直接复用 `galay-kernel` 的 `HandleOption`。
+  - 移除 `MongoConfig::socket_timeout_ms` 与同步连接内部 socket timeout 字段，不再设置 socket 层收发超时。
+  - 同步与异步连接在设置 `TCP_NODELAY` 失败时返回连接错误，避免丢弃 `HandleOption` 的失败结果。
+  - 新增 `t9_socket_options_source` 源码约束测试，并更新 API / FAQ 文档说明同步连接超时边界。

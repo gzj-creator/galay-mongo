@@ -1,7 +1,8 @@
 #include "client.h"
 
-#include "galay-mongo/base/socket_options.h"
 #include "galay-mongo/protocol/builder.h"
+
+#include <galay-kernel/common/handle_option.h>
 
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -766,7 +767,12 @@ struct AsyncMongoClientInternals
             co_return std::unexpected(mapIoError(connect_result.error(), MONGO_ERROR_CONNECTION));
         }
 
-        trySetTcpNoDelay(client.m_socket.handle().fd, config.tcp_nodelay);
+        if (config.tcp_nodelay) {
+            auto nodelay_result = client.m_socket.option().handleTcpNoDelay();
+            if (!nodelay_result.has_value()) {
+                co_return std::unexpected(mapIoError(nodelay_result.error(), MONGO_ERROR_CONNECTION));
+            }
+        }
         co_return std::expected<void, MongoError>{};
     }
 
