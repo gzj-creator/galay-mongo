@@ -109,7 +109,7 @@ if(GALAY_MONGO_INSTALL_MODULE_INTERFACE AND NOT GALAY_MONGO_IMPORT_COMPILATION_E
 endif()
 
 install(EXPORT galay-mongo-targets
-    FILE galay-mongo-targets.cmake
+    FILE galayMongoConfigTargets.cmake
     NAMESPACE galay-mongo::
     DESTINATION lib/cmake/galay-mongo
 )

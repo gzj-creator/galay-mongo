@@ -58,3 +58,13 @@
   - 移除 `MongoConfig::socket_timeout_ms` 与同步连接内部 socket timeout 字段，不再设置 socket 层收发超时。
   - 同步与异步连接在设置 `TCP_NODELAY` 失败时返回连接错误，避免丢弃 `HandleOption` 的失败结果。
   - 新增 `t9_socket_options_source` 源码约束测试，并更新 API / FAQ 文档说明同步连接超时边界。
+
+## v3.0.1 - 2026-05-18
+
+- 版本级别：小版本（patch）
+- Git 提交消息：`chore: 统一 CMake 导出文件命名`
+- Git Tag：`v3.0.1`
+- 自述摘要：
+  - 将安装导出的 CMake targets 文件改为 `galayMongoConfigTargets.cmake`，并同步 `galay-mongo-config.cmake` 的 include 路径。
+  - Release 安装随主 targets 文件生成 `galayMongoConfigTargets-release.cmake`，统一驼峰导出文件命名。
+  - 将 CMake project 版本提升到 `3.0.1`，确保源码版本元数据、tag 与发布记录一致。

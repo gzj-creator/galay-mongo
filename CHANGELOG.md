@@ -5,6 +5,14 @@
 
 ## [Unreleased]
 
+## [v3.0.1] - 2026-05-18
+
+### Changed
+- 将安装导出的 CMake targets 文件改为 `galayMongoConfigTargets.cmake`，同步 package config 的 include 路径。
+- Release 安装现在生成 `galayMongoConfigTargets-release.cmake`，与新的驼峰导出文件命名保持一致。
+- 将 CMake project 版本提升到 `3.0.1`，对齐本次发布 tag。
+
+
 ## [v3.0.0] - 2026-05-11
 
 ### Changed
