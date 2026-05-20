@@ -15,7 +15,6 @@ export module galay.mongo;
 export using ::galay::mongo::MongoConfig;
 export using ::galay::mongo::MongoErrorType;
 export using ::galay::mongo::MongoError;
-export using ::galay::mongo::MongoLogger;
 export using ::galay::mongo::MongoValueType;
 export using ::galay::mongo::MongoValue;
 export using ::galay::mongo::MongoDocument;

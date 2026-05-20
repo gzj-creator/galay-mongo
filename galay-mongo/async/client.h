@@ -80,12 +80,6 @@ public:
         return *this;
     }
 
-    AsyncMongoClientBuilder& loggerName(std::string logger_name)
-    {
-        m_config.logger_name = std::move(logger_name);
-        return *this;
-    }
-
     AsyncMongoClient build() const;
 
     AsyncMongoConfig buildConfig() const
@@ -151,14 +145,6 @@ public:
     MongoBufferProvider& bufferProvider() { return m_ring_buffer.provider(); }
     const MongoBufferProvider& bufferProvider() const { return m_ring_buffer.provider(); }
     int32_t nextRequestId();
-    MongoLogger& logger() { return m_logger; }
-    const MongoLogger& logger() const { return m_logger; }
-
-    void setLogger(MongoLoggerPtr logger)
-    {
-        m_logger.set(std::move(logger));
-    }
-
 private:
     friend struct AsyncMongoClientInternals;
 
@@ -173,7 +159,6 @@ private:
     std::string m_ping_encoded_template;
     size_t m_pipeline_reserve_per_command = 96;
     int32_t m_next_request_id = 1;
-    MongoLogger m_logger;
 };
 
 inline AsyncMongoClient AsyncMongoClientBuilder::build() const

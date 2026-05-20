@@ -75,12 +75,6 @@
 #if __has_include(<poll.h>)
 #include <poll.h>
 #endif
-#if __has_include(<spdlog/sinks/stdout_color_sinks.h>)
-#include <spdlog/sinks/stdout_color_sinks.h>
-#endif
-#if __has_include(<spdlog/spdlog.h>)
-#include <spdlog/spdlog.h>
-#endif
 #if __has_include(<string>)
 #include <string>
 #endif

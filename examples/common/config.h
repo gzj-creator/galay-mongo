@@ -109,7 +109,6 @@ inline galay::mongo::AsyncMongoConfig loadAsyncMongoConfigFromEnv()
         }
     }
 
-    cfg.logger_name = envOrDefault("GALAY_MONGO_LOGGER_NAME", cfg.logger_name);
     return cfg;
 }
 

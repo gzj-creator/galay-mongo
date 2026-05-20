@@ -1,7 +1,5 @@
-find_package(galay-kernel CONFIG REQUIRED)
+find_package(galay-kernel 5.0.0 CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED)
-find_package(spdlog CONFIG REQUIRED)
-find_path(SPDLOG_INCLUDE_DIR spdlog/spdlog.h REQUIRED)
 
 include_directories(${OPENSSL_INCLUDE_DIR})
 
@@ -18,13 +16,6 @@ endif()
 if(TARGET OpenSSL::Crypto)
     set_property(TARGET OpenSSL::Crypto PROPERTY SYSTEM ON)
 endif()
-if(TARGET spdlog::spdlog)
-    set_property(TARGET spdlog::spdlog PROPERTY SYSTEM ON)
-endif()
-if(TARGET spdlog::spdlog_header_only)
-    set_property(TARGET spdlog::spdlog_header_only PROPERTY SYSTEM ON)
-endif()
-
 add_library(${PROJECT_NAME} ${GALAY_MONGO_LIBRARY_TYPE} ${SOURCES})
 
 target_link_libraries(${PROJECT_NAME}
@@ -41,7 +32,6 @@ target_include_directories(${PROJECT_NAME}
 )
 target_include_directories(${PROJECT_NAME}
     SYSTEM PUBLIC ${OPENSSL_INCLUDE_DIR}
-                  ${SPDLOG_INCLUDE_DIR}
 )
 
 galay_mongo_apply_cxx(${PROJECT_NAME})
@@ -56,7 +46,6 @@ if(GALAY_MONGO_IMPORT_COMPILATION_ENABLED AND CMAKE_VERSION VERSION_GREATER_EQUA
     )
     target_include_directories(${PROJECT_NAME}-modules
         SYSTEM PUBLIC ${OPENSSL_INCLUDE_DIR}
-                      ${SPDLOG_INCLUDE_DIR}
     )
     galay_mongo_apply_cxx(${PROJECT_NAME}-modules)
     target_sources(${PROJECT_NAME}-modules

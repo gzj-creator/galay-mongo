@@ -144,10 +144,9 @@
 
 - `auto close()`
 - `bool isClosed() const`
-- `MongoLogger& logger()`
-- `void setLogger(std::shared_ptr<spdlog::logger> logger)`
+- 日志入口：`galay::mongo::log::set/get`
 
-说明：`MongoLogger` 对 `std::shared_ptr<spdlog::logger>` 做了封装，外部通过 `setLogger(...)` 注入即可。
+说明：日志入口使用 `galay::kernel::BaseLogger`，只影响 `galay-mongo` 自身日志。
 
 ### 4.5 AsyncMongoConfig
 
@@ -159,7 +158,6 @@
 | `recv_timeout` | `std::chrono::milliseconds` | `-1ms` | `<0` 表示不启用 |
 | `buffer_size` | `size_t` | `16384` | 环形缓冲区大小 |
 | `pipeline_reserve_per_command` | `size_t` | `96` | pipeline 每条命令的编码预留字节估算 |
-| `logger_name` | `std::string` | `MongoClientLogger` | 默认 logger 名称 |
 
 方法：
 

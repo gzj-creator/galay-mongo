@@ -15,8 +15,6 @@ struct AsyncMongoConfig
     std::chrono::milliseconds recv_timeout = std::chrono::milliseconds(-1);  ///< 接收超时（负值表示不限时）
     size_t buffer_size = 16384;                                              ///< 接收环形缓冲区大小
     size_t pipeline_reserve_per_command = 96;                                 ///< pipeline 每条命令的预留编码字节估算
-    std::string logger_name = "MongoClientLogger";                           ///< 默认 logger 名称
-
     /// 判断发送超时是否启用
     bool isSendTimeoutEnabled() const
     {

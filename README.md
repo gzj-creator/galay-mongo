@@ -31,7 +31,6 @@
 - C++23 编译器（推荐 GCC 13+/Clang 16+）
 - CMake 3.20+
 - OpenSSL
-- spdlog
 - Galay 内部依赖（统一联调推荐）：
   - `galay-kernel`（构建必需）
   - `galay-utils`（推荐）
@@ -40,14 +39,14 @@
 ## 依赖安装（macOS / Homebrew）
 
 ```bash
-brew install cmake spdlog openssl
+brew install cmake openssl
 ```
 
 ## 依赖安装（Ubuntu / Debian）
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y cmake g++ libspdlog-dev libssl-dev
+sudo apt-get install -y cmake g++ libssl-dev
 ```
 
 ## 拉取源码（统一联调推荐）
@@ -142,8 +141,6 @@ cmake --build build --parallel
 - `GALAY_MONGO_ASYNC_RECV_TIMEOUT_MS`
 - `GALAY_MONGO_ASYNC_BUFFER_SIZE`
 - `GALAY_MONGO_ASYNC_PIPELINE_RESERVE`
-- `GALAY_MONGO_LOGGER_NAME`
-
 ## Examples
 
 构建：

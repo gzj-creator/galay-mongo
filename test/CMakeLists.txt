@@ -17,3 +17,4 @@ add_mongo_test(t9_socket_options_source t9_socket_options_source.cc)
 target_compile_definitions(t9_socket_options_source
     PRIVATE GALAY_MONGO_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
+add_mongo_test(t10_log t10_log.cc)

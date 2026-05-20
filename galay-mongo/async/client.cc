@@ -939,13 +939,11 @@ struct AsyncMongoClientInternals
             if (next_result.value()) {
                 client.m_is_closed = false;
                 if (state.auth_enabled) {
-                    MongoLogInfo(client.m_logger.get(),
-                                 "Mongo connected and authenticated successfully to {}:{}",
+                    MONGO_LOG_INFO("[client]", "Mongo connected and authenticated successfully to {}:{}",
                                  state.config.host,
                                  state.config.port);
                 } else {
-                    MongoLogInfo(client.m_logger.get(),
-                                 "Mongo connected successfully to {}:{}",
+                    MONGO_LOG_INFO("[client]", "Mongo connected successfully to {}:{}",
                                  state.config.host,
                                  state.config.port);
                 }
@@ -1170,11 +1168,6 @@ AsyncMongoClient::AsyncMongoClient(IOScheduler* scheduler,
     , m_pipeline_reserve_per_command(std::max<size_t>(32, m_config.pipeline_reserve_per_command))
 {
     (void)scheduler;
-    if (m_config.logger_name.empty()) {
-        m_logger.ensure("MongoClientLogger");
-    } else {
-        m_logger.ensure(m_config.logger_name);
-    }
 }
 
 AsyncMongoClient::AsyncMongoClient(AsyncMongoClient&& other) noexcept
@@ -1187,7 +1180,6 @@ AsyncMongoClient::AsyncMongoClient(AsyncMongoClient&& other) noexcept
     , m_ping_encoded_template(std::move(other.m_ping_encoded_template))
     , m_pipeline_reserve_per_command(other.m_pipeline_reserve_per_command)
     , m_next_request_id(other.m_next_request_id)
-    , m_logger(std::move(other.m_logger))
 {
     other.m_is_closed = true;
 }
@@ -1208,7 +1200,6 @@ AsyncMongoClient& AsyncMongoClient::operator=(AsyncMongoClient&& other) noexcept
         m_ping_encoded_template = std::move(other.m_ping_encoded_template);
         m_pipeline_reserve_per_command = other.m_pipeline_reserve_per_command;
         m_next_request_id = other.m_next_request_id;
-        m_logger = std::move(other.m_logger);
         other.m_is_closed = true;
     }
     return *this;

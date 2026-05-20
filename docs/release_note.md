@@ -68,3 +68,14 @@
   - 将安装导出的 CMake targets 文件改为 `galayMongoConfigTargets.cmake`，并同步 `galay-mongo-config.cmake` 的 include 路径。
   - Release 安装随主 targets 文件生成 `galayMongoConfigTargets-release.cmake`，统一驼峰导出文件命名。
   - 将 CMake project 版本提升到 `3.0.1`，确保源码版本元数据、tag 与发布记录一致。
+
+## v3.1.0 - 2026-05-20
+
+- 版本级别：中版本（minor）
+- Git 提交消息：`feat: 增加 mongo 库级 BaseLogger 日志入口`
+- Git Tag：`v3.1.0`
+- 自述摘要：
+  - 新增 `galay::mongo::log::set/get`，用户可只为 `galay-mongo` 设置 `BaseLogger`，不会影响其他 galay 库日志。
+  - 新增 `MONGO_LOG_*` 与 `MONGO_LOG_ENABLED`，并在异步连接成功路径增加按级别过滤的日志埋点。
+  - 移除 `spdlog` 构建依赖、客户端级 logger 配置和 `logger_name` 配置字段，改为库级 `BaseLogger` 注入。
+  - 将 `galay-kernel` 依赖约束同步提升到 `5.0.0`，项目版本提升到 `3.1.0`。

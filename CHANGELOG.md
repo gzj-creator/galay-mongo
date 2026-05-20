@@ -1,9 +1,23 @@
 # CHANGELOG
 
 维护说明：
-- 未打 tag 的改动先写入 `
+- 未打 tag 的改动先写入 `## [Unreleased]`。
+- 发版时将累计变更整理到 `## [vX.Y.Z] - YYYY-MM-DD`，并同步 `docs/release_note.md`。
+- 版本升级规则：破坏性或架构大改升主版本，新功能升次版本，修复或维护升修订版本。
 
 ## [Unreleased]
+
+## [v3.1.0] - 2026-05-20
+
+### Added
+- 新增 `galay::mongo::log::set/get` 库级日志入口，使用 `galay-kernel` 的 `BaseLogger` 按库隔离启用 Mongo 日志。
+- 新增 `MONGO_LOG_*` 与 `MONGO_LOG_ENABLED` 宏，并在异步连接成功路径增加日志埋点。
+- 新增 `t10_log`，验证空 logger 与级别过滤时不会执行日志参数构造。
+
+### Changed
+- 移除 `spdlog` 构建依赖、客户端级 logger 配置和 `logger_name` 配置字段，日志启用改为库级 `BaseLogger` 注入。
+- 将 `galay-kernel` 依赖约束提升到 `5.0.0`，并同步导出包配置。
+- 将项目版本提升到 `3.1.0`，与本次发布 tag 对齐。
 
 ## [v3.0.1] - 2026-05-18
 
@@ -11,7 +25,6 @@
 - 将安装导出的 CMake targets 文件改为 `galayMongoConfigTargets.cmake`，同步 package config 的 include 路径。
 - Release 安装现在生成 `galayMongoConfigTargets-release.cmake`，与新的驼峰导出文件命名保持一致。
 - 将 CMake project 版本提升到 `3.0.1`，对齐本次发布 tag。
-
 
 ## [v3.0.0] - 2026-05-11
 

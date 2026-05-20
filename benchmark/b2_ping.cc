@@ -11,7 +11,6 @@
 #include <iostream>
 #include <mutex>
 #include <new>
-#include <spdlog/spdlog.h>
 #include <string>
 #include <thread>
 #include <vector>
@@ -153,9 +152,6 @@ Task<void> runWorker(IOScheduler* scheduler,
         .scheduler(scheduler)
         .bufferSize(cfg.buffer_size)
         .build();
-    if (auto logger = client.logger().get()) {
-        logger->set_level(spdlog::level::err);
-    }
 
     std::vector<double> local_lat;
     local_lat.reserve((cfg.total_requests / worker_count) + 8);
