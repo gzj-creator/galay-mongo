@@ -1,3 +1,13 @@
+/**
+ * @file module_prelude.hpp
+ * @brief galay-mongo 模块统一头文件前置包含
+ * @author galay-mongo
+ * @version 1.0.0
+ *
+ * @details 使用 __has_include 条件编译，按需包含 galay-mongo 所需的所有标准库和
+ * 第三方头文件。作为单点导入入口，避免各模块重复列出依赖。
+ */
+
 #pragma once
 
 #if __has_include(<algorithm>)

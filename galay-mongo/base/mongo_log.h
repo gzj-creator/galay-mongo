@@ -1,6 +1,14 @@
 /**
  * @file mongo_log.h
  * @brief galay-mongo 独立日志入口与埋点宏
+ * @author galay-mongo
+ * @version 1.0.0
+ *
+ * @details 提供 galay-mongo 库的日志基础设施，包括：
+ * - set()/get()：设置和获取库级 logger
+ * - MONGO_LOG_TRACE/DEBUG/INFO/WARN/ERROR：各级别日志宏
+ *
+ * @note 推荐在创建 Mongo client 之前的单线程初始化阶段调用 set()
  */
 
 #ifndef GALAY_MONGO_LOG_H

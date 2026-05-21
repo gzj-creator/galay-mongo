@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(galay-mongo VERSION 3.1.0 LANGUAGES CXX)
+project(galay-mongo VERSION 3.1.1 LANGUAGES CXX)
 
 include(cmake/option.cmake)
 
